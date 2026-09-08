@@ -73,6 +73,7 @@ const mocks = vi.hoisted(() => ({
   unarchiveThreadMutate: vi.fn(),
   uploadPromptAttachmentMutateAsync: vi.fn(),
   updateQueuedMessageMutateAsync: vi.fn(),
+  updateThreadMutate: vi.fn(),
   useThreadDefaultExecutionOptions: vi.fn(),
   useThreadCreationOptions: vi.fn(),
   useThreadPromptHistory: vi.fn(),
@@ -126,7 +127,10 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         model: {
           active?: { model: string } | null;
         };
-        reasoning: { value: string };
+        reasoning: {
+          value: string;
+          onChange: (value: string) => void;
+        };
         serviceTier?: { value?: string };
       };
       executionReadOnly?: boolean;
@@ -175,6 +179,12 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         </div>
         <div data-testid="selected-model">{execution.model.active?.model}</div>
         <div data-testid="selected-reasoning">{execution.reasoning.value}</div>
+        <button
+          type="button"
+          onClick={() => execution.reasoning.onChange("high")}
+        >
+          Select high effort
+        </button>
         <div data-testid="selected-service-tier">
           {execution.serviceTier?.value}
         </div>
@@ -557,6 +567,9 @@ vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
     mutate: mocks.unarchiveThreadMutate,
     variables: null,
   }),
+  useUpdateThread: () => ({
+    mutate: mocks.updateThreadMutate,
+  }),
 }));
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
@@ -761,6 +774,7 @@ beforeEach(() => {
   }));
   mocks.queuedMessages = [];
   mocks.updateQueuedMessageMutateAsync.mockResolvedValue(undefined);
+  mocks.updateThreadMutate.mockReset();
   mocks.useThreadCreationOptions.mockClear();
   mocks.useThreadDefaultExecutionOptions.mockClear();
   mocks.useThreadPromptHistory.mockClear();
@@ -777,6 +791,17 @@ afterEach(() => {
 });
 
 describe("ThreadDetailPromptArea", () => {
+  it("persists a selected reasoning level as the thread override", () => {
+    renderPromptArea();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select high effort" }));
+
+    expect(mocks.updateThreadMutate).toHaveBeenCalledWith({
+      id: "thr_1",
+      reasoningLevel: "high",
+    });
+  });
+
   it("shows queued work while its message details are loading", () => {
     mocks.queuedMessages = undefined;
 

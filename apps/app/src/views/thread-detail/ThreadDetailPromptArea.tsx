@@ -20,6 +20,7 @@ import type {
   EnvironmentStatus,
   PendingInteraction,
   PromptInput,
+  ReasoningLevel,
   ThreadQueuedMessage,
   ThreadPullRequest,
   ThreadTimelineActivePromptMode,
@@ -86,7 +87,10 @@ import {
   useClearThreadGoal,
   useStopThread,
 } from "@/hooks/mutations/thread-runtime-mutations";
-import { useUnarchiveThread } from "@/hooks/mutations/thread-state-mutations";
+import {
+  useUnarchiveThread,
+  useUpdateThread,
+} from "@/hooks/mutations/thread-state-mutations";
 import {
   getLatestPendingInteraction,
   useThreadQueuedMessages,
@@ -638,6 +642,7 @@ export function ThreadDetailPromptArea({
     initialPermissionMode: defaultExecutionOptions?.permissionMode,
     initialEnvironmentSelectionValue: thread.environmentId ?? undefined,
   });
+  const updateThread = useUpdateThread();
   const fallbackIdentity = modelFallback
     ? `${thread.id}:${modelFallback.sourceSeq}`
     : null;
@@ -657,6 +662,13 @@ export function ThreadDetailPromptArea({
       setSelectedModel(model);
     },
     [fallbackIdentity, setSelectedModel],
+  );
+  const handleReasoningChange = useCallback(
+    (value: ReasoningLevel) => {
+      setReasoningLevel(value);
+      updateThread.mutate({ id: thread.id, reasoningLevel: value });
+    },
+    [setReasoningLevel, thread.id, updateThread],
   );
   const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId: thread.projectId,
@@ -1154,7 +1166,7 @@ export function ThreadDetailPromptArea({
       reasoning: {
         value: reasoningLevel,
         options: reasoningOptions,
-        onChange: setReasoningLevel,
+        onChange: handleReasoningChange,
       },
       footerAction: {
         label: "Handoff to new thread",
@@ -1166,7 +1178,7 @@ export function ThreadDetailPromptArea({
       executionOptionsRouting,
       hasMultipleProviders,
       handleHandoffToNewThread,
-      handleModelChange,
+      handleReasoningChange,
       isLoadingModels,
       modelLoadFailed,
       modelLoadError,
@@ -1179,8 +1191,6 @@ export function ThreadDetailPromptArea({
       selectedProviderId,
       serviceTier,
       serviceTierSupportByProvider,
-      setReasoningLevel,
-      setServiceTier,
       supportsServiceTier,
       serviceTierFastLabel,
     ],

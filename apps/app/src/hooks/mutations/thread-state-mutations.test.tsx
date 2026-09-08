@@ -18,6 +18,7 @@ import {
 } from "@/test/fixtures/projects";
 import {
   sidebarNavigationQueryKey,
+  threadDefaultExecutionOptionsQueryKey,
   threadListQueryKey,
   threadQueryKey,
 } from "../queries/query-keys";
@@ -164,6 +165,38 @@ describe("thread state mutations", () => {
     await waitFor(() => {
       expect(result.current.isSuccess).toBe(true);
     });
+  });
+
+  it("refreshes thread defaults after persisting an execution override", async () => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    const threadId = "thread-1";
+    const defaultExecutionOptionsKey =
+      threadDefaultExecutionOptionsQueryKey(threadId);
+    queryClient.setQueryData(defaultExecutionOptionsKey, {
+      model: "gpt-5",
+      permissionMode: "auto",
+      reasoningLevel: "medium",
+      serviceTier: "default",
+      source: "client/turn/requested",
+    });
+    vi.mocked(sdk.threads.update).mockResolvedValue(
+      makeThreadResponse({ id: threadId }),
+    );
+
+    const { result } = renderHook(() => useUpdateThread(), { wrapper });
+    act(() => {
+      result.current.mutate({ id: threadId, reasoningLevel: "high" });
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(sdk.threads.update).toHaveBeenCalledWith({
+      reasoningLevel: "high",
+      threadId,
+    });
+    expect(
+      queryClient.getQueryState(defaultExecutionOptionsKey)?.isInvalidated,
+    ).toBe(true);
   });
 
   it("optimistically moves a thread between sections while the update request is pending", async () => {

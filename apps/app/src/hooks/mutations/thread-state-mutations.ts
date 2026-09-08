@@ -33,6 +33,7 @@ import {
   type PinnedThreadOrderTransaction,
   type ThreadListMutationTransaction,
 } from "../cache-owners/thread-state-cache-owner";
+import { threadDefaultExecutionOptionsQueryKey } from "../queries/query-keys";
 
 interface ThreadMutationRequest {
   id: string;
@@ -99,8 +100,16 @@ export function useUpdateThread(options?: UpdateThreadMutationOptions) {
         transaction: context,
       });
     },
-    onSuccess: (thread) => {
+    onSuccess: (thread, variables) => {
       applyThreadUpdateResult({ queryClient, thread });
+      if (
+        variables.model !== undefined ||
+        variables.reasoningLevel !== undefined
+      ) {
+        void queryClient.invalidateQueries({
+          queryKey: threadDefaultExecutionOptionsQueryKey(thread.id),
+        });
+      }
     },
   });
 }
