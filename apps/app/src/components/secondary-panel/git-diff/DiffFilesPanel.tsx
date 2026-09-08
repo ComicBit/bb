@@ -61,6 +61,7 @@ export function DiffFilesPanel({
   onSelectionAddToChat,
 }: DiffFilesPanelProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const previousFilesUpdatedAtRef = useRef<number | null>(null);
   const { requestPaths, getPatchState, retry, loadPath, seedInitialPatches } =
     useEnvironmentDiffPatches(environmentId, { target });
 
@@ -117,7 +118,11 @@ export function DiffFilesPanel({
     if (!isPanelOpen) {
       return;
     }
-    requestPaths({ visible: visiblePaths, overscan: overscanPaths });
+    const force =
+      previousFilesUpdatedAtRef.current !== null &&
+      previousFilesUpdatedAtRef.current !== filesUpdatedAt;
+    previousFilesUpdatedAtRef.current = filesUpdatedAt;
+    requestPaths({ visible: visiblePaths, overscan: overscanPaths, force });
     // oxlint-disable-next-line react/exhaustive-deps
   }, [isPanelOpen, requestPaths, visibleKey, overscanKey, filesUpdatedAt]);
 

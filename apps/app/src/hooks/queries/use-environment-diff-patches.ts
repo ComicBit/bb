@@ -31,6 +31,7 @@ export interface DiffPatchState {
 interface RequestDiffPatchPathsArgs {
   visible: string[];
   overscan: string[];
+  force?: boolean;
 }
 
 interface UseEnvironmentDiffPatchesArgs {
@@ -56,6 +57,7 @@ const IDLE_STATE: DiffPatchState = { status: "idle" };
 interface PendingPaths {
   visible: string[];
   overscan: string[];
+  force: boolean;
 }
 
 interface InFlightState {
@@ -137,8 +139,13 @@ export function useEnvironmentDiffPatches(
   );
 
   const [inFlight, setInFlight] = useState<InFlightState>(EMPTY_IN_FLIGHT);
+  const [, setPatchCacheRevision] = useState(0);
 
-  const pendingPathsRef = useRef<PendingPaths>({ visible: [], overscan: [] });
+  const pendingPathsRef = useRef<PendingPaths>({
+    visible: [],
+    overscan: [],
+    force: false,
+  });
   const targetIdentityRef = useRef(targetIdentity);
   const inFlightRef = useRef(inFlight);
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -150,7 +157,7 @@ export function useEnvironmentDiffPatches(
 
   useEffect(() => {
     targetIdentityRef.current = targetIdentity;
-    pendingPathsRef.current = { visible: [], overscan: [] };
+    pendingPathsRef.current = { visible: [], overscan: [], force: false };
     if (debounceTimerRef.current !== null) {
       clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
@@ -274,7 +281,10 @@ export function useEnvironmentDiffPatches(
     const currentEvictionGeneration =
       getDiffPatchEvictionGeneration(environmentId);
     const toFetch = ordered.filter((path) => {
-      if (readDiffPatchEntry({ queryClient, identity, path }) !== undefined) {
+      if (
+        !pendingPathsRef.current.force &&
+        readDiffPatchEntry({ queryClient, identity, path }) !== undefined
+      ) {
         return false;
       }
       if (
@@ -310,6 +320,7 @@ export function useEnvironmentDiffPatches(
       pendingPathsRef.current = {
         visible: args.visible,
         overscan: args.overscan,
+        force: args.force ?? false,
       };
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
@@ -386,8 +397,23 @@ export function useEnvironmentDiffPatches(
 
   const seedInitialPatches = useCallback(
     (entries: DiffPatchEntry[]) => {
+      let changed = false;
       for (const entry of entries) {
+        const previous = readDiffPatchEntry({
+          queryClient,
+          identity,
+          path: entry.path,
+        });
+        if (
+          previous?.patch !== entry.patch ||
+          previous.truncated !== entry.truncated
+        ) {
+          changed = true;
+        }
         writeDiffPatchEntry({ queryClient, identity, entry });
+      }
+      if (changed) {
+        setPatchCacheRevision((revision) => revision + 1);
       }
     },
     [queryClient, identity],

@@ -304,6 +304,58 @@ describe("useEnvironmentDiffPatches", () => {
     });
     expect(queryClient.getQueryData<DiffPatchEntry>(patchKey())).toEqual(patch);
   });
+
+  it("refreshes a retained patch without returning its card to loading", async () => {
+    const { wrapper, queryClient } = createQueryClientTestHarness();
+    const currentPatch: DiffPatchEntry = {
+      path: PATH,
+      patch: "diff --git a/file.ts b/file.ts\n+current\n",
+      truncated: false,
+    };
+    const refreshedPatch: DiffPatchEntry = {
+      path: PATH,
+      patch: "diff --git a/file.ts b/file.ts\n+refreshed\n",
+      truncated: false,
+    };
+    const refresh = createDeferredPromise<EnvironmentDiffPatchResponse>();
+    vi.mocked(sdk.environments.diffPatch).mockReturnValue(refresh.promise);
+
+    const { result } = renderHook(
+      () => useEnvironmentDiffPatches(ENVIRONMENT_ID, { target: TARGET }),
+      { wrapper },
+    );
+    act(() => {
+      result.current.seedInitialPatches([currentPatch]);
+      result.current.requestPaths({
+        visible: [PATH],
+        overscan: [],
+        force: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(sdk.environments.diffPatch).toHaveBeenCalledTimes(1);
+    });
+    expect(result.current.getPatchState(PATH)).toMatchObject({
+      status: "loaded",
+      patch: currentPatch.patch,
+    });
+
+    await act(async () => {
+      refresh.resolve(availableResponse(refreshedPatch));
+      await refresh.promise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.getPatchState(PATH)).toMatchObject({
+        status: "loaded",
+        patch: refreshedPatch.patch,
+      });
+    });
+    expect(queryClient.getQueryData<DiffPatchEntry>(patchKey())).toEqual(
+      refreshedPatch,
+    );
+  });
 });
 
 describe("useEnvironmentDiffPatches cache retention", () => {
