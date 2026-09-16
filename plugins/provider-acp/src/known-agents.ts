@@ -33,6 +33,8 @@ function ancestorRoots(entries: readonly RootEntry[]) {
   return entries.map((entry) => ({ ...entryOf(entry), ancestors: true }));
 }
 
+const OMP_MCP_TIMEOUT_ABOVE_REQUEST_INPUT_CEILING_MS = 65 * 60 * 1000;
+
 export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
   {
     id: "acp-cursor",
@@ -125,7 +127,11 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       displayName: "omp",
       command: "omp",
       args: ["acp"],
-      env: {},
+      env: {
+        OMP_MCP_TIMEOUT_MS: String(
+          OMP_MCP_TIMEOUT_ABOVE_REQUEST_INPUT_CEILING_MS,
+        ),
+      },
       nativeSkillRoots: {
         user: plainRoots([
           ".agent/skills",

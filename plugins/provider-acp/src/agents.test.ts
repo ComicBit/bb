@@ -294,6 +294,19 @@ describe("acpProviderDeclaration", () => {
     );
   });
 
+  it("launches omp with an MCP timeout above BB's interaction ceiling", () => {
+    const omp = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-omp")!,
+    );
+    const launch = experimental_acpLaunchSpecSchema.parse(
+      omp.experimental_bridgeOptions?.acpLaunchSpec,
+    );
+
+    expect(Number(launch.env.OMP_MCP_TIMEOUT_MS)).toBeGreaterThan(
+      60 * 60 * 1000,
+    );
+  });
+
   it("keeps each agent's own reasoning ladder and installed-only visibility", () => {
     const grok = acpProviderDeclaration(
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-grok")!,
