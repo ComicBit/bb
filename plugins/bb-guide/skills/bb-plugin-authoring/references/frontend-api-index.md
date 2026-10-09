@@ -120,6 +120,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginMessageDirectiveMessage`
 - `PluginMessageDirectiveOpenWorkspaceFile`
 - `PluginMessageDirectiveProps`
+- `ExperimentalCodeFenceRendererProps`
 - `PluginHomepageSectionRegistration`
 - `PluginSettingsSectionRegistration`
 - `ExperimentalAppOverlayRegistration`
@@ -175,6 +176,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginSourceCodeRendererRegistration`
 - `PluginDiffRendererRegistration`
 - `PluginMessageDirectiveRegistration`
+- `ExperimentalCodeFenceRendererRegistration`
 - `ThreadChatMessageReference`
 - `PluginTargetedPanelActionOpenOptions`
 - `PluginMessageActionContext`

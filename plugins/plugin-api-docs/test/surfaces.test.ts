@@ -22,6 +22,7 @@ describe("product-map surfaces", () => {
       "thread-header",
       "timeline-renderers",
       "message-directives",
+      "code-fence-renderers",
       "message-actions",
       "pending-interaction",
       "code-renderers",

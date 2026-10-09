@@ -47,6 +47,10 @@ import {
   type MarkdownMessageDirectives,
 } from "@/components/ui/markdown-message-directives.js";
 import {
+  useCodeFenceRendererRegistry,
+  type MarkdownCodeFenceRenderers,
+} from "@/components/ui/markdown-code-fence-renderers.js";
+import {
   boundedMarkdownPreview,
   closeUnterminatedMarkdownCodeSpan,
   USER_MESSAGE_CHAR_CAP,
@@ -578,6 +582,31 @@ function AssistantConversationMessage({
     onOpenPluginPanel,
   ]);
 
+  const codeFenceRendererRegistry = useCodeFenceRendererRegistry();
+  const codeFenceRenderers = useMemo<MarkdownCodeFenceRenderers | undefined>(
+    () =>
+      codeFenceRendererRegistry === null || codeFenceRendererRegistry.size === 0
+        ? undefined
+        : {
+            registry: codeFenceRendererRegistry,
+            message: {
+              id,
+              threadId,
+              turnId,
+              projectId: projectId ?? null,
+            },
+            openThreadPanel: onOpenPluginPanel ?? null,
+          },
+    [
+      codeFenceRendererRegistry,
+      id,
+      threadId,
+      turnId,
+      projectId,
+      onOpenPluginPanel,
+    ],
+  );
+
   return (
     <div
       className={cn(
@@ -600,6 +629,7 @@ function AssistantConversationMessage({
           incrementalBlocks
           linkRouting={linkRouting}
           messageDirectives={messageDirectives}
+          codeFenceRenderers={codeFenceRenderers}
           threadMentions={ASSISTANT_THREAD_MENTIONS}
         />
         {streamingSplit === null ? null : (
@@ -611,6 +641,7 @@ function AssistantConversationMessage({
             incrementalBlocks
             linkRouting={linkRouting}
             messageDirectives={messageDirectives}
+            codeFenceRenderers={codeFenceRenderers}
             threadMentions={ASSISTANT_THREAD_MENTIONS}
           />
         )}
