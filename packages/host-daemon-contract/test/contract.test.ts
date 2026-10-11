@@ -458,6 +458,10 @@ const ONLINE_RPC_RESPONSE_RESULT_FIXTURES: OnlineRpcResponseResultFixtures = {
       ],
     },
   },
+  "provider.sessions.list": {
+    sessions: [{ environmentId: "env-live", threadId: "thr-live" }],
+  },
+  "thread.tools.update": { status: "applied" },
   "host.discover_repos": {
     repos: [
       {
@@ -862,6 +866,18 @@ const INTENTIONAL_OPTIONAL_HOST_DAEMON_FIELDS: Record<string, string> = {
     "a question option carries a description only when its label needs a gloss; absence means the label stands alone.",
   "hostDaemonInteractiveRequestSchema.interaction.payload.questions.shortLabel":
     "a user question omits shortLabel when its prompt is short enough to title the row itself.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation":
+    "a dynamic tool declares a row presentation only when its plugin wrote one; absence means bb renders the call with the standard tool name and the plugin's branding glyph.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation.badge":
+    "a dynamic tool's presentation carries a badge only when there is something to flag about how the call will run; absence means the ordinary case, not a blank badge.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation.detail":
+    "a dynamic tool's presentation has a detail only when the plugin summarized the call; a missing detail means the label and title are the whole summary, not an empty string.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation.suppress":
+    "a dynamic tool's presentation marks suppress only for low-value rows the plugin wants collapsed; absence means render normally.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation.tint":
+    "a dynamic tool's presentation carries a tint only when the plugin wants an accent colour; absence means the neutral row tint, which is not a colour value.",
+  "hostDaemonOnlineRpcCommandSchema.dynamicTools.presentation.title":
+    "a dynamic tool's presentation has a title only when the call has a headline (a path, a query); absence means the label stands alone.",
   "hostDaemonOnlineRpcCommandSchema.nativeRoots.commands.project.skipIfManifest":
     "a provider-native root names a vendor-plugin marker file only when the plugin that knows that vendor layout declares one; absence means every skill-shaped directory under the root is a skill, and core names no vendor path itself.",
   "hostDaemonOnlineRpcCommandSchema.nativeRoots.commands.user.skipIfManifest":
@@ -1256,7 +1272,7 @@ describe("host-daemon command schemas", () => {
   });
 
   it("uses the current host-daemon protocol version", () => {
-    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(241);
+    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(242);
     expect(HOST_ARTIFACT_MAX_BYTES).toBe(256 * 1024 * 1024);
   });
 

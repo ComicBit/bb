@@ -678,6 +678,21 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
         options,
       ),
     }),
+  "provider.sessions.list": async (_command, options) => ({
+    sessions: options.runtimeManager.listHostedProviderSessions(),
+  }),
+  "thread.tools.update": async (command, options) => {
+    const entry = await options.runtimeManager.getOrAwait(
+      command.environmentId,
+    );
+    if (!entry) {
+      return { status: "no_session" };
+    }
+    return entry.runtime.updateThreadDynamicTools({
+      threadId: command.threadId,
+      dynamicTools: command.dynamicTools,
+    });
+  },
   "host.discover_repos": (command) =>
     discoverRepos({
       maxDepth: command.maxDepth,

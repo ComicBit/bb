@@ -23,6 +23,7 @@ export const BRIDGE_REQUEST_METHODS = {
   threadArchive: "thread/archive",
   threadUnarchive: "thread/unarchive",
   threadGoalClear: "thread/goal/clear",
+  threadToolsUpdate: "thread/tools/update",
   turnStart: "turn/start",
   turnSteer: "turn/steer",
   skillsConfigure: "skills/configure",
@@ -89,6 +90,20 @@ export const threadNameSetParamsSchema = z
     threadId: z.string().min(1),
     providerThreadId: z.string().min(1),
     title: z.string().min(1),
+  })
+  .passthrough();
+
+export const threadToolsUpdateParamsSchema = z
+  .object({
+    threadId: z.string().min(1),
+    providerThreadId: z.string().min(1),
+    dynamicTools: z.array(dynamicToolSchema),
+  })
+  .passthrough();
+
+export const threadToolsUpdateResultSchema = z
+  .object({
+    applied: z.boolean(),
   })
   .passthrough();
 

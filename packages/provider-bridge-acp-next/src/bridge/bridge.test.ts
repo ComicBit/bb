@@ -2281,6 +2281,102 @@ describe("acp bridge", () => {
     });
   });
 
+  it("pushes thread/tools/update to the session's bb-bridge MCP server", async () => {
+    const initializeId = sendRequest("initialize", {
+      protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
+      client: { name: "bb", version: "1.0.0" },
+    });
+    expect((await waitForResponse(initializeId)).result).toMatchObject({
+      capabilities: { threadToolsUpdate: true },
+    });
+    const originalTool = {
+      name: "aurora_run",
+      description: "Run an Aurora job.",
+      inputSchema: { type: "object", properties: { job: { type: "string" } } },
+    };
+    const { bbThreadId, providerThreadId } = await startThread({
+      dynamicTools: [originalTool],
+    });
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "echo-mcp-server-config", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+    await waitForTurnCompleted();
+    const configPrefix = "mcp-server-config:";
+    const configText = agentMessageTexts().find((text) =>
+      text.startsWith(configPrefix),
+    );
+    if (!configText) {
+      throw new Error("Fake ACP agent did not report MCP server config");
+    }
+    const [mcpServerConfig] = JSON.parse(
+      configText.slice(configPrefix.length),
+    ) as { env: { name: string; value: string }[] }[];
+    const env = new Map(
+      (mcpServerConfig?.env ?? []).map(({ name, value }) => [name, value]),
+    );
+    const subscription = createConnection({
+      host: env.get("BB_ACP_DYNAMIC_TOOL_HOST"),
+      port: Number(env.get("BB_ACP_DYNAMIC_TOOL_PORT")),
+    });
+    const snapshots: unknown[] = [];
+    let buffer = "";
+    subscription.setEncoding("utf8");
+    subscription.on("data", (chunk) => {
+      buffer += chunk;
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        snapshots.push(JSON.parse(buffer.slice(0, newlineIndex)));
+        buffer = buffer.slice(newlineIndex + 1);
+        newlineIndex = buffer.indexOf("\n");
+      }
+    });
+    subscription.write(
+      `${JSON.stringify({
+        kind: "subscribe",
+        threadId: env.get("BB_ACP_DYNAMIC_TOOL_THREAD_ID"),
+        token: env.get("BB_ACP_DYNAMIC_TOOL_TOKEN"),
+      })}\n`,
+    );
+    try {
+      await waitFor(() => snapshots[0], "initial tool snapshot");
+      expect(snapshots).toEqual([{ kind: "tools", tools: [originalTool] }]);
+
+      const widenedTool = {
+        ...originalTool,
+        inputSchema: {
+          type: "object",
+          properties: {
+            job: { type: "string" },
+            dryRun: { type: "boolean" },
+          },
+        },
+      };
+      const updateId = sendRequest("thread/tools/update", {
+        threadId: bbThreadId,
+        providerThreadId,
+        dynamicTools: [widenedTool],
+      });
+      expect((await waitForResponse(updateId)).result).toEqual({
+        applied: true,
+      });
+      await waitFor(() => snapshots[1], "updated tool snapshot");
+      expect(snapshots[1]).toEqual({ kind: "tools", tools: [widenedTool] });
+
+      const unknownThreadId = sendRequest("thread/tools/update", {
+        threadId: "thread-without-session",
+        providerThreadId: "provider-without-session",
+        dynamicTools: [widenedTool],
+      });
+      expect((await waitForResponse(unknownThreadId)).result).toEqual({
+        applied: false,
+      });
+      expect(snapshots).toHaveLength(2);
+    } finally {
+      subscription.destroy();
+    }
+  });
+
   it.each(["socket-close", "provider-exit", "turn-end"])(
     "cancels the runtime tool request after %s",
     async (kind) => {

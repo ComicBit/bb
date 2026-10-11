@@ -2,7 +2,14 @@ import {
   resolveHostEnvironment,
   mergeHostAndProviderEnvironment,
 } from "../hosts/host-environment.js";
-import { getEnvironment, getHost, getProject } from "@bb/db";
+import {
+  getEnvironment,
+  getHost,
+  getProject,
+  type EnvironmentRow,
+  type HostRow,
+  type ProjectRow,
+} from "@bb/db";
 import type {
   DynamicTool,
   InstructionMode,
@@ -105,47 +112,49 @@ function resolveDynamicTools(
   ];
 }
 
-export function resolvePermissionEscalation(
-  args: ResolvePermissionEscalationArgs,
-): PermissionEscalation {
-  if (args.initiator !== "user") {
-    return "deny";
-  }
-
-  return "ask";
+interface ThreadAgentConfigurationTarget {
+  environmentId: string;
+  hostId: string;
+  model: string;
+  thread: Thread;
 }
 
-export async function resolveThreadRuntimeCommandConfig(
+interface ThreadAgentContextRows {
+  environment: EnvironmentRow;
+  host: HostRow;
+  project: ProjectRow;
+}
+
+function requireThreadAgentContextRows(
   deps: LoggedWorkSessionDeps,
-  args: ResolveThreadRuntimeCommandConfigArgs,
-): Promise<ResolvedThreadRuntimeCommandConfig> {
-  markTurnTraceSpan("runtimeConfig.started");
-  const workspacePath = requireWorkspacePath(args.environment);
+  args: ThreadAgentConfigurationTarget,
+): ThreadAgentContextRows {
   const project = getProject(deps.db, args.thread.projectId);
   if (!project) {
     throw new ApiError(404, "project_not_found", "Project not found");
   }
-  const environment = getEnvironment(deps.db, args.environment.id);
+  const environment = getEnvironment(deps.db, args.environmentId);
   if (!environment) {
     throw new ApiError(404, "environment_not_found", "Environment not found");
   }
-  const host = getHost(deps.db, args.environment.hostId);
+  const host = getHost(deps.db, args.hostId);
   if (!host) {
     throw new ApiError(404, "host_not_found", "Host not found");
   }
+  return { environment, host, project };
+}
 
-  const workspaceAgentContext = await readWorkspaceAgentContext(deps, {
-    includeAgentInstructions: true,
-    hostId: args.environment.hostId,
-    workspacePath,
-  });
-  markTurnTraceSpan("runtimeConfig.workspaceRead");
+async function resolveThreadAgentConfiguration(
+  deps: LoggedWorkSessionDeps,
+  args: ThreadAgentConfigurationTarget & { rows: ThreadAgentContextRows },
+) {
+  const { environment, host, project } = args.rows;
   const pluginSkillRoots = getPluginSkillRootContributions();
   const skillIdsByPlugin = discoverPluginSkillIds(deps.logger, {
     pluginSkillRoots,
     skillTreeRegistry: deps.skillTreeRegistry,
   });
-  const conditionalConfiguration = await resolvePluginAgentConfiguration({
+  return resolvePluginAgentConfiguration({
     context: {
       thread: {
         id: args.thread.id,
@@ -184,6 +193,56 @@ export async function resolveThreadRuntimeCommandConfig(
       },
     },
     skillIdsByPlugin,
+  });
+}
+
+export async function resolveThreadDynamicTools(
+  deps: LoggedWorkSessionDeps,
+  args: ThreadAgentConfigurationTarget,
+): Promise<DynamicTool[]> {
+  const configuration = await resolveThreadAgentConfiguration(deps, {
+    ...args,
+    rows: requireThreadAgentContextRows(deps, args),
+  });
+  return resolveDynamicTools(configuration.tools).map(
+    (contribution) => contribution.tool,
+  );
+}
+
+export function resolvePermissionEscalation(
+  args: ResolvePermissionEscalationArgs,
+): PermissionEscalation {
+  if (args.initiator !== "user") {
+    return "deny";
+  }
+
+  return "ask";
+}
+
+export async function resolveThreadRuntimeCommandConfig(
+  deps: LoggedWorkSessionDeps,
+  args: ResolveThreadRuntimeCommandConfigArgs,
+): Promise<ResolvedThreadRuntimeCommandConfig> {
+  markTurnTraceSpan("runtimeConfig.started");
+  const workspacePath = requireWorkspacePath(args.environment);
+  const target = {
+    environmentId: args.environment.id,
+    hostId: args.environment.hostId,
+    model: args.model,
+    thread: args.thread,
+  };
+  const rows = requireThreadAgentContextRows(deps, target);
+  const { host, project } = rows;
+
+  const workspaceAgentContext = await readWorkspaceAgentContext(deps, {
+    includeAgentInstructions: true,
+    hostId: args.environment.hostId,
+    workspacePath,
+  });
+  markTurnTraceSpan("runtimeConfig.workspaceRead");
+  const conditionalConfiguration = await resolveThreadAgentConfiguration(deps, {
+    ...target,
+    rows,
   });
   markTurnTraceSpan("runtimeConfig.pluginConfig");
   const contributedEnv = mergeHostAndProviderEnvironment(

@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { type DbConnection } from "@bb/db";
+import { threads, type DbConnection } from "@bb/db";
 import { createMigratedConnection } from "@bb/db/testing";
-import { encodeClientTurnRequestIdNumber } from "@bb/domain";
+import { eq } from "drizzle-orm";
+import { encodeClientTurnRequestIdNumber, type DynamicTool } from "@bb/domain";
 import type { Logger } from "@bb/logger";
 import { RESERVED_AGENT_TOOL_NAMES } from "@get-bb/plugin-sdk/internal/host-policy";
 import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
@@ -19,6 +20,8 @@ import {
   prepareTurnSubmitCommandPayload,
 } from "../../../src/services/threads/thread-commands.js";
 import { UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME } from "../../../src/services/threads/thread-environment-directory.js";
+import { requestLiveThreadToolSync } from "../../../src/services/threads/live-thread-tools.js";
+import { registerHostRpcResponder } from "../../helpers/host-rpc.js";
 import { internalAuthHeaders } from "../../helpers/commands.js";
 import { readJson } from "../../helpers/json.js";
 import { textInput } from "../../helpers/prompt-input.js";
@@ -750,6 +753,97 @@ describe("plugin tools reach thread runtime config", () => {
       "Call demo_lookup before guessing demo data.",
     );
     expect(command.instructions).not.toContain("quiet_tool");
+  });
+
+  it("pushes a reloaded plugin's changed tool schema to live provider sessions only when it changed", async () => {
+    const toolSource = (properties: string) => `
+      export default function plugin(bb: any) {
+        bb.agents.registerTool({
+          name: "aurora_run",
+          description: "Run an Aurora job",
+          parameters: { type: "object", properties: ${properties} },
+          execute: () => "ran",
+        });
+      }
+    `;
+    const rootDir = await writePlugin(pluginsDir, {
+      name: "bb-plugin-aurora",
+      serverSource: toolSource(`{ job: { type: "string" } }`),
+    });
+    const entry = await harness.pluginService.installPath(rootDir);
+    const { host, session } = seedHostSession(harness.deps, {
+      id: "host-live-tools",
+    });
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+      path: join(harness.config.dataDir, "live-tools-workspace"),
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      providerId: "codex",
+    });
+    harness.deps.db
+      .update(threads)
+      .set({ modelOverride: "gpt-5" })
+      .where(eq(threads.id, thread.id))
+      .run();
+    const pushed: DynamicTool[][] = [];
+    const sentToolSets = new Set<string>();
+    registerHostRpcResponder(harness, {
+      hostId: host.id,
+      sessionId: session.id,
+      handle: (request) => {
+        if (request.command.type === "provider.sessions.list") {
+          return {
+            ok: true,
+            result: {
+              sessions: [
+                { environmentId: environment.id, threadId: thread.id },
+                { environmentId: environment.id, threadId: "thread-gone" },
+              ],
+            },
+          };
+        }
+        if (request.command.type === "thread.tools.update") {
+          const key = JSON.stringify(request.command.dynamicTools);
+          const changed = !sentToolSets.has(key);
+          sentToolSets.add(key);
+          if (changed) pushed.push(request.command.dynamicTools);
+          return {
+            ok: true,
+            result: { status: changed ? "applied" : "unchanged" },
+          };
+        }
+        throw new Error(`Unexpected host RPC ${request.command.type}`);
+      },
+    });
+    const runSchema = (tools: DynamicTool[] | undefined) =>
+      tools?.find((tool) => tool.name === "aurora_run")?.inputSchema;
+
+    await requestLiveThreadToolSync(harness.deps);
+    expect(pushed).toHaveLength(1);
+    expect(runSchema(pushed[0])).toMatchObject({
+      properties: { job: { type: "string" } },
+    });
+
+    await writeFile(
+      join(rootDir, "server.ts"),
+      toolSource(`{ job: { type: "string" }, dryRun: { type: "boolean" } }`),
+    );
+    await harness.pluginService.reload(entry.id);
+    await requestLiveThreadToolSync(harness.deps);
+    expect(pushed).toHaveLength(2);
+    expect(runSchema(pushed[1])).toMatchObject({
+      properties: { job: { type: "string" }, dryRun: { type: "boolean" } },
+    });
+
+    await requestLiveThreadToolSync(harness.deps);
+    expect(pushed).toHaveLength(2);
   });
 
   it("resolves different conditional tools, skills, instructions, and context without rebuilding static registrations", async () => {

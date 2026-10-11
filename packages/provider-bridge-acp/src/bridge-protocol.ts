@@ -15,6 +15,7 @@ import {
   threadResumeParamsSchema as canonicalThreadResumeParamsSchema,
   threadStartParamsSchema as canonicalThreadStartParamsSchema,
   threadStopParamsSchema as canonicalThreadStopParamsSchema,
+  threadToolsUpdateParamsSchema,
   turnStartParamsSchema as canonicalTurnStartParamsSchema,
   turnSteerParamsSchema as canonicalTurnSteerParamsSchema,
 } from "@bb/provider-bridge-protocol";
@@ -93,6 +94,10 @@ export const acpBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
     method: z.literal("skills/configure"),
     params: skillsConfigureParamsSchema,
+  }),
+  z.object({
+    method: z.literal("thread/tools/update"),
+    params: threadToolsUpdateParamsSchema,
   }),
 ]);
 

@@ -304,6 +304,26 @@ with `METHOD_NOT_FOUND` still starts threads. The runtime never probes.
 Conformance rule `skills/configure-declared` pins both directions: declared →
 the request must succeed; undeclared → the request must be refused.
 
+### Live tool updates
+
+`thread/tools/update { threadId, providerThreadId, dynamicTools }` replaces a
+live session's bb-injected tool set and answers `{ applied }`. The runtime
+sends it **only to a bridge whose handshake declares `threadToolsUpdate:
+true`**, and only when the set differs from the one the session holds; the
+capability is optional and absent means `false`. The server resolves the set
+through the same policy as `thread.start`/`turn.submit` whenever a plugin
+loads, reloads, is enabled or disabled, or changes settings, and the daemon
+also refreshes it on every `turn.submit` to a live session. A bridge records
+the new set as the session's construction tools (so a rebuilt session uses
+it) and answers `applied: false` when it cannot change the running provider
+session, for example because no tool server was mounted at construction.
+Instructions stay frozen for the session's life. The ACP bridges serve tools
+through their `bb-bridge` MCP server: it subscribes to the bridge over its
+loopback socket, swaps its list, and emits `notifications/tools/list_changed`
+once per change in the MCP-visible name, description, or schema. Calls already
+running finish; calls to a removed tool are refused. Codex and Claude Code do
+not declare the capability and keep their construction-time tools.
+
 ### Recovery hints
 
 A hint says what went wrong in the provider's own terms and what the runtime

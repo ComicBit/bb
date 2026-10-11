@@ -35,7 +35,7 @@ type ExistingThreadRuntimeCommand =
 const TURN_SUBMIT_ACTIVE_TURN_WAIT_MS = 5_000;
 const TURN_SUBMIT_STEER_ATTEMPTS = 2;
 
-interface ResumeThreadRuntimeIfMissingArgs {
+interface ExistingThreadRuntimeArgs {
   command: ExistingThreadRuntimeCommand;
   entry: RuntimeEntry;
   options: CommandDispatchOptions;
@@ -183,8 +183,28 @@ async function resolveThreadStartRuntime(
   return { bridgeLaunch, entry };
 }
 
+async function refreshLiveThreadDynamicTools(
+  args: ExistingThreadRuntimeArgs,
+): Promise<void> {
+  const { command, entry, options } = args;
+  if (!entry.runtime.hasThread(command.threadId)) {
+    return;
+  }
+  try {
+    await entry.runtime.updateThreadDynamicTools({
+      threadId: command.threadId,
+      dynamicTools: command.resumeContext.dynamicTools,
+    });
+  } catch (error) {
+    options.logger.warn(
+      { err: error, threadId: command.threadId },
+      "Could not refresh the live provider session's dynamic tools",
+    );
+  }
+}
+
 async function resumeThreadRuntimeIfMissing(
-  args: ResumeThreadRuntimeIfMissingArgs,
+  args: ExistingThreadRuntimeArgs,
 ): Promise<void> {
   const { command, entry, options } = args;
   const { resumeContext } = command;
@@ -330,6 +350,7 @@ export async function ensureThreadRuntime(
       `Thread ${command.threadId} still runs a turn in environment ${busyEnvironmentId}`,
     );
   }
+  await refreshLiveThreadDynamicTools({ command, entry, options });
   await resumeThreadRuntimeIfMissing({ command, entry, options });
   markTurnSubmitTraceSpan("runtime.ready");
   return entry;

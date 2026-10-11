@@ -388,6 +388,46 @@ const threadRenameCommandSchema = hostDaemonThreadTargetSchema
   })
   .strict();
 
+const threadToolsUpdateCommandSchema = hostDaemonThreadTargetSchema
+  .extend({
+    type: z.literal("thread.tools.update"),
+    dynamicTools: z.array(dynamicToolSchema),
+  })
+  .strict();
+
+export const threadToolsUpdateStatusSchema = z.enum([
+  "applied",
+  "deferred",
+  "unchanged",
+  "no_session",
+]);
+export type ThreadToolsUpdateStatus = z.infer<
+  typeof threadToolsUpdateStatusSchema
+>;
+
+const threadToolsUpdateResultSchema = z
+  .object({ status: threadToolsUpdateStatusSchema })
+  .strict();
+
+const providerSessionsListCommandSchema = z
+  .object({
+    type: z.literal("provider.sessions.list"),
+  })
+  .strict();
+
+const providerSessionsListResultSchema = z
+  .object({
+    sessions: z.array(
+      z
+        .object({
+          environmentId: z.string().min(1),
+          threadId: z.string().min(1),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
 const threadArchiveCommandSchema = hostDaemonThreadWorkspaceTargetSchema
   .extend({
     type: z.literal("thread.archive"),
@@ -1983,6 +2023,24 @@ export const hostDaemonCommandRegistry = {
     resultSchema: providerUsageResultSchema,
     transport: "onlineRpc",
     retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "provider.sessions.list": defineHostDaemonCommandDescriptor({
+    type: "provider.sessions.list",
+    schema: providerSessionsListCommandSchema,
+    resultSchema: providerSessionsListResultSchema,
+    transport: "onlineRpc",
+    retryable: true,
+    flushEventsBeforeResult: false,
+    envLane: null,
+  }),
+  "thread.tools.update": defineHostDaemonCommandDescriptor({
+    type: "thread.tools.update",
+    schema: threadToolsUpdateCommandSchema,
+    resultSchema: threadToolsUpdateResultSchema,
+    transport: "onlineRpc",
+    retryable: false,
     flushEventsBeforeResult: false,
     envLane: null,
   }),

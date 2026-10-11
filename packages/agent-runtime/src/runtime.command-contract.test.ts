@@ -310,6 +310,61 @@ describe("createAgentRuntime command contracts", () => {
     }
   });
 
+  it("records changed dynamic tools without sending them to a bridge that cannot hot-update", async () => {
+    const { record, runtime } = createContractRuntime();
+    const lookupTool = {
+      name: "docs_lookup",
+      description: "Look up docs.",
+      inputSchema: { type: "object", properties: {} },
+    };
+
+    try {
+      await expect(
+        runtime.updateThreadDynamicTools({
+          threadId: "t1",
+          dynamicTools: [lookupTool],
+        }),
+      ).resolves.toEqual({ status: "no_session" });
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: fullRuntimeOptions,
+        dynamicTools: [lookupTool],
+      });
+      expect(runtime.listHostedThreadIds()).toEqual(["t1"]);
+      await expect(
+        runtime.updateThreadDynamicTools({
+          threadId: "t1",
+          dynamicTools: [{ ...lookupTool }],
+        }),
+      ).resolves.toEqual({ status: "unchanged" });
+      const widenedTool = {
+        ...lookupTool,
+        inputSchema: {
+          type: "object",
+          properties: { query: { type: "string" } },
+        },
+      };
+      await expect(
+        runtime.updateThreadDynamicTools({
+          threadId: "t1",
+          dynamicTools: [widenedTool],
+        }),
+      ).resolves.toEqual({ status: "deferred" });
+      await expect(
+        runtime.updateThreadDynamicTools({
+          threadId: "t1",
+          dynamicTools: [widenedTool],
+        }),
+      ).resolves.toEqual({ status: "unchanged" });
+      expect(record.last("thread/tools/update")).toBeUndefined();
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
   it("does not retry a rename: the bridge owns the not-ready-rollout ladder", async () => {
     const { record, runtime } = createContractRuntime({
       launch: {

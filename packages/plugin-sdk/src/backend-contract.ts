@@ -1640,11 +1640,17 @@ export interface PluginAgents {
    * factory execution. A throw, malformed result, duplicate id, unknown id,
    * or more than 256 tool/skill ids fails closed for this plugin only.
    *
-   * Tools take effect when the provider session is next started or resumed;
-   * an already-running session is not hot-mutated. Instructions follow the
-   * same boundary: a live provider session keeps the instructions it was
-   * constructed with, and a changed selection applies when the session is
-   * next constructed. Skill changes follow BB's environment runtime policy:
+   * Tool lists and schemas are resolved again when a plugin loads, reloads,
+   * is enabled or disabled, or changes settings, and on every `turn.submit`.
+   * Providers whose bridge supports live tool updates (the ACP providers,
+   * through their `bb-bridge` MCP server and `notifications/tools/list_changed`)
+   * see the new list in the running session; other providers (Codex, Claude
+   * Code) pick it up when the session is next started or resumed. A tool call
+   * already in flight finishes; a call to a removed tool is refused.
+   * Instructions stay session-constructed: a live provider session keeps the
+   * instructions it was constructed with, and a changed selection applies when
+   * the session is next constructed. Skill changes follow BB's environment
+   * runtime policy:
    * a busy runtime keeps its current catalog until a safe relaunch. Side chats
    * are ordinary plugin-owned forks here — read `origin` to detect them — and
    * their returned tool, skill, and dynamic-instruction selections apply at the
