@@ -69,6 +69,8 @@ const hostCommandWakePolicy = {
   "provider.installation.status": "work",
   "provider.installation.run": "work",
   "provider.usage": "work",
+  "provider.sessions.list": "never",
+  "thread.tools.update": "never",
   "host.discover_repos": "work",
   "workspace.status": "work",
   "workspace.diff": "work",

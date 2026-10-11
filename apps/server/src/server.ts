@@ -61,6 +61,7 @@ import {
 import { setPluginMachineProviderBridge } from "./services/plugins/plugin-machine-provider-registry.js";
 import { invalidateEnvironmentProviderMachineAvailability } from "./services/environments/provider-machine-availability.js";
 import { requestQueuedMessageDispatch } from "./services/threads/queued-message-dispatch.js";
+import { requestLiveThreadToolSync } from "./services/threads/live-thread-tools.js";
 import { registerInternalEventRoutes } from "./internal/events.js";
 import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
@@ -771,6 +772,9 @@ export function createApp(
     onSettingsChanged: (pluginId) => {
       deps.providerNativeRoots.invalidate(pluginId);
       deps.providerRegistry.forgetAllInstalled();
+    },
+    onPluginsChanged: () => {
+      void requestLiveThreadToolSync(deps);
     },
     onPluginUnregistered: (pluginId) => {
       requestQueuedMessageDispatch(deps, {

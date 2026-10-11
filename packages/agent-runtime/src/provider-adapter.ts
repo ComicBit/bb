@@ -114,6 +114,12 @@ export type AdapterCommand =
       providerThreadId: string;
     }
   | {
+      type: "thread/tools/update";
+      threadId: string;
+      providerThreadId: string;
+      dynamicTools: DynamicTool[];
+    }
+  | {
       type: "thread/name/set";
       threadId: string;
       providerThreadId: string;

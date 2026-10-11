@@ -421,6 +421,16 @@ export function createBridgeProtocolAdapter(
               providerThreadId: command.providerThreadId,
             },
           });
+        case "thread/tools/update":
+          return gate("threadToolsUpdate", {
+            kind: "request",
+            method: BRIDGE_REQUEST_METHODS.threadToolsUpdate,
+            params: {
+              threadId: command.threadId,
+              providerThreadId: command.providerThreadId,
+              dynamicTools: command.dynamicTools,
+            },
+          });
       }
     },
 

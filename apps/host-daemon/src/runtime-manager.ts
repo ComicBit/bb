@@ -516,6 +516,15 @@ export class RuntimeManager {
     return activeThreads;
   }
 
+  listHostedProviderSessions(): { environmentId: string; threadId: string }[] {
+    return [...this.entries.values()].flatMap((entry) =>
+      entry.runtime.listHostedThreadIds().map((threadId) => ({
+        environmentId: entry.environmentId,
+        threadId,
+      })),
+    );
+  }
+
   listLoadedEnvironments(): HostDaemonLoadedEnvironment[] {
     return [...this.entries.keys()].map((environmentId) => ({
       environmentId,

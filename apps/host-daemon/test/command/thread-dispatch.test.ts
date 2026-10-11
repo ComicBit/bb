@@ -13,7 +13,10 @@ import {
 } from "@bb/domain";
 import { makeTempDir } from "@bb/test-helpers";
 import { describe, expect, it, vi } from "vitest";
-import { dispatchCommand } from "../../src/command-dispatch.js";
+import {
+  dispatchCommand,
+  dispatchOnlineRpcCommand,
+} from "../../src/command-dispatch.js";
 import { CommandDispatchError } from "../../src/command-dispatch-support.js";
 import type { FetchProjectAttachment } from "../../src/project-attachments.js";
 import { RuntimeManager } from "../../src/runtime-manager.js";
@@ -1332,6 +1335,81 @@ describe("thread command dispatch", () => {
     );
     expect(harness.runtimeState.stoppedThreadId).toBeUndefined();
     expect(harness.manager.listActiveThreads()).toEqual([]);
+  });
+
+  it("lists hosted provider sessions and updates their dynamic tools", async () => {
+    const harness = createHarness();
+    await dispatchCommand(
+      {
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        type: "thread.start",
+        environmentId: "env-1",
+        threadId: "thread-1",
+        workspaceContext: { workspacePath: "/tmp/env-1" },
+        projectId: "project-1",
+        providerId: "fake",
+        requestId: nextClientRequestId(),
+        input: [textPromptInput("hello")],
+        options: {
+          model: "gpt-5",
+          serviceTier: "default",
+          reasoningLevel: "medium",
+          providerOptions: {},
+          permissionMode: "full",
+          permissionScope: "full",
+          approvalReviewer: null,
+          permissionEscalation: null,
+        },
+        instructions: "Be a helpful coding agent.",
+        dynamicTools: [],
+        contributedEnv: [],
+        injectedSkillSources: [],
+        instructionMode: "append",
+      },
+      harness.dispatchOptions(),
+    );
+    const tool = {
+      name: "aurora_run",
+      description: "Run an Aurora job.",
+      inputSchema: { type: "object", properties: {} },
+    };
+
+    await expect(
+      dispatchOnlineRpcCommand(
+        { type: "provider.sessions.list" },
+        harness.dispatchOptions(),
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({
+      sessions: [{ environmentId: "env-1", threadId: "thread-1" }],
+    });
+    await expect(
+      dispatchOnlineRpcCommand(
+        {
+          type: "thread.tools.update",
+          environmentId: "env-1",
+          threadId: "thread-1",
+          dynamicTools: [tool],
+        },
+        harness.dispatchOptions(),
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ status: "applied" });
+    await expect(
+      dispatchOnlineRpcCommand(
+        {
+          type: "thread.tools.update",
+          environmentId: "env-unloaded",
+          threadId: "thread-1",
+          dynamicTools: [tool],
+        },
+        harness.dispatchOptions(),
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ status: "no_session" });
+    expect(harness.runtimeState.updatedDynamicTools).toEqual([
+      { threadId: "thread-1", dynamicTools: [tool] },
+    ]);
   });
 
   it("stops a hosted thread through the runtime", async () => {

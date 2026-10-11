@@ -264,6 +264,17 @@ interface ClearThreadGoalArgs {
   threadId: string;
 }
 
+export interface UpdateThreadDynamicToolsArgs {
+  threadId: string;
+  dynamicTools: DynamicTool[];
+}
+
+export type ThreadDynamicToolsUpdateStatus =
+  | "applied"
+  | "deferred"
+  | "unchanged"
+  | "no_session";
+
 interface ArchiveThreadArgs {
   bridgeLaunch: AgentRuntimeBridgeLaunch;
   providerId: string;
@@ -355,6 +366,12 @@ export interface AgentRuntime {
   ): Promise<ReapIdleProviderSessionsResult>;
 
   hasThread(threadId: string): boolean;
+
+  listHostedThreadIds(): string[];
+
+  updateThreadDynamicTools(
+    args: UpdateThreadDynamicToolsArgs,
+  ): Promise<{ status: ThreadDynamicToolsUpdateStatus }>;
 
   getLiveThreadIds(): string[];
 

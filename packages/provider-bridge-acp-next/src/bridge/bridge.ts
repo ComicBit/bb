@@ -8,6 +8,7 @@ import {
 } from "@bb/domain";
 import type {
   AvailableModel,
+  DynamicTool,
   ExtensionKind,
   JsonValue,
   PromptInput,
@@ -169,6 +170,7 @@ import {
   ACP_BRIDGE_MCP_SERVER_NAME,
   buildAcpMcpServerConfig,
   dynamicToolBridgeRequestSchema,
+  encodeDynamicToolSnapshot,
   runAcpDynamicToolMcpServer,
   type AcpMcpServerConfig,
 } from "./tool-proxy-mcp.js";
@@ -230,6 +232,7 @@ interface AcpThreadSession {
   pendingElicitations: Set<AcpAgentRequestResponder>;
   pendingToolCalls: Set<AbortController>;
   cursorMcpApproval: CursorMcpApproval | undefined;
+  dynamicToolBridgeMounted: boolean;
   deferStartEmit: AcpDeferredStartEmitter | undefined;
   awaitingFirstPrompt: boolean;
   turnOutputCount: number;
@@ -250,6 +253,7 @@ const pendingRuntimeRequests = new Map<
 >();
 let runtimeRequestIdCounter = 0;
 let dynamicToolBridgePromise: Promise<AcpDynamicToolBridge> | null = null;
+const dynamicToolSubscribersByThreadId = new Map<string, Set<Socket>>();
 
 const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
 const AGENT_TURN_QUIET_MS = 5_000;
@@ -473,6 +477,53 @@ async function forwardDynamicToolCall(
   }
 }
 
+function subscribeToDynamicToolUpdates(threadId: string, socket: Socket): void {
+  const subscribers =
+    dynamicToolSubscribersByThreadId.get(threadId) ?? new Set<Socket>();
+  dynamicToolSubscribersByThreadId.set(threadId, subscribers);
+  subscribers.add(socket);
+  socket.once("close", () => {
+    subscribers.delete(socket);
+    if (subscribers.size === 0) {
+      dynamicToolSubscribersByThreadId.delete(threadId);
+    }
+  });
+  const session = sessionsByBbThreadId.get(threadId);
+  if (session) {
+    socket.write(
+      encodeDynamicToolSnapshot(session.construction.dynamicTools ?? []),
+    );
+  }
+}
+
+function updateSessionDynamicTools(
+  session: AcpThreadSession,
+  dynamicTools: readonly DynamicTool[],
+): boolean {
+  session.construction = { ...session.construction, dynamicTools };
+  session.translator.configureInjectedTools(
+    dynamicTools.map((tool) => ({
+      name: tool.name,
+      ...(tool.presentation === undefined
+        ? {}
+        : { presentation: tool.presentation }),
+    })),
+  );
+  if (!session.dynamicToolBridgeMounted) {
+    return false;
+  }
+  const snapshot = encodeDynamicToolSnapshot(dynamicTools);
+  for (const socket of dynamicToolSubscribersByThreadId.get(
+    session.bbThreadId,
+  ) ?? []) {
+    socket.write(snapshot);
+  }
+  process.stderr.write(
+    `acp bridge: updated "${ACP_BRIDGE_MCP_SERVER_NAME}" tools for thread "${session.bbThreadId}" (${dynamicTools.length} tools)\n`,
+  );
+  return true;
+}
+
 function handleDynamicToolBridgeSocket(
   bridge: AcpDynamicToolBridge,
   socket: Socket,
@@ -511,6 +562,10 @@ function handleDynamicToolBridgeSocket(
         `acp bridge: "${ACP_BRIDGE_MCP_SERVER_NAME}" answered initialize for thread "${request.data.threadId}" (${request.data.toolCount} tools)\n`,
       );
       socket.end(`${JSON.stringify({ ok: true, content: "" })}\n`);
+      return;
+    }
+    if (request.data.kind === "subscribe") {
+      subscribeToDynamicToolUpdates(request.data.threadId, socket);
       return;
     }
     void forwardDynamicToolCall(request.data, controller.signal).then(
@@ -2295,6 +2350,7 @@ async function startAgentSession(
     pendingElicitations: new Set(),
     pendingToolCalls: new Set(),
     cursorMcpApproval: undefined,
+    dynamicToolBridgeMounted: false,
     deferStartEmit: emitStartNotification,
     awaitingFirstPrompt: true,
   };
@@ -2325,6 +2381,7 @@ async function startAgentSession(
     const mcpServers = await buildSessionMcpServers(params);
     const mcpServer = mcpServers[0];
     if (mcpServer) {
+      session.dynamicToolBridgeMounted = true;
       session.cursorMcpApproval = await approveCursorSessionMcpServer({
         agentCommand: params.agent.command,
         config: mcpServer,
@@ -3627,6 +3684,7 @@ async function handleRequest(
           threadArchive: false,
           threadRename: false,
           threadGoalClear: false,
+          threadToolsUpdate: true,
           fork: "tip",
           approvalEnforcedBy: "runtime",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
@@ -3863,6 +3921,16 @@ async function handleRequest(
       }));
       sendResult(request.id, { ok: true });
       return;
+
+    case "thread/tools/update": {
+      const session = sessionsByBbThreadId.get(request.params.threadId);
+      sendResult(request.id, {
+        applied:
+          session !== undefined &&
+          updateSessionDynamicTools(session, request.params.dynamicTools),
+      });
+      return;
+    }
   }
 }
 
@@ -3915,6 +3983,9 @@ async function stopAllSessions(): Promise<void> {
       stopSession(session),
     ),
   );
+  for (const subscribers of dynamicToolSubscribersByThreadId.values()) {
+    for (const socket of subscribers) socket.destroy();
+  }
   const dynamicToolBridge = dynamicToolBridgePromise
     ? await dynamicToolBridgePromise.catch(() => null)
     : null;

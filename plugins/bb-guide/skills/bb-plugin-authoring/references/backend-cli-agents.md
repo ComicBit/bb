@@ -220,11 +220,12 @@ the plugin's branding glyph.
 
 `configure` and `contributeInstructions` are synchronous, may each be
 registered once per factory execution, and run whenever BB resolves a
-thread's configuration (`thread.start` and `turn.submit`), so keep them fast.
-Prefer `skills/` for standing knowledge. Resolved tools and instructions take
-effect only when the provider session is next constructed; BB never
-hot-mutates a running session. A busy environment keeps its current staged
-skill catalog until a safe relaunch. Side chats also run both callbacks.
+thread's configuration (`thread.start` and `turn.submit`), and `configure`
+runs again for every live provider session when a plugin's tools may have
+changed, so keep them fast. Prefer `skills/` for standing knowledge. Resolved
+instructions take effect only when the provider session is next constructed;
+live tool updates are described below. A busy environment keeps its current
+staged skill catalog until a safe relaunch. Side chats also run both callbacks.
 
 `configure`'s context has required, plain-data `thread`, `project`,
 `environment`, `host`, and `provider` objects. The `provider` object includes
@@ -249,6 +250,20 @@ data-dir user instructions, then workspace instructions. Tool snippets above
 4096 characters reject the registration; each callback contribution is
 truncated to 4096 characters, and a throwing `contributeInstructions` is
 logged and contributes nothing.
+
+Resolution happens for `thread.start` and `turn.submit`, and again for every
+live provider session whenever a plugin loads, reloads, is enabled or disabled,
+or changes settings. When the resolved tool list or a tool schema changes, BB
+pushes it to running sessions that can accept it: the ACP providers (`omp`,
+OpenCode, Cursor, Grok, and other ACP agents) update their `bb-bridge` MCP
+server and send `notifications/tools/list_changed`, so the agent sees the new
+tools without a restart. Codex and Claude Code keep the tool set their session
+was constructed with and pick up the change when the session is next
+started/resumed. A tool call already in flight finishes normally; a call to a
+tool that was removed fails with an unknown-tool error. Instructions,
+including per-tool `instructions`, are not hot-updated: a live provider session
+keeps the instructions it was constructed with, and changed instructions apply
+when the session is next constructed.
 
 ### bb.experimental_aiServices — titles, commit messages, and voice
 
