@@ -307,20 +307,44 @@ it("delivers a live transcript after the completion transition, but never animat
   expect(playCompletionTransition).toHaveBeenCalledOnce();
 });
 
-it("discards the recording when the user cancels its first transcription", async () => {
+it("keeps the recording for retry when the user cancels its first transcription", async () => {
+  const transcribe = vi
+    .fn((args: { file: File; signal?: AbortSignal }) =>
+      Promise.resolve(args.file.name),
+    )
+    .mockImplementationOnce(
+      ({ signal }) =>
+        new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("Cancelled", "AbortError")),
+          );
+        }),
+    )
+    .mockResolvedValueOnce("Retried words");
+  const onTranscript = vi.fn();
   const { result } = renderHook(() =>
     useVoiceInput({
       recordingKey: "thread/cancelled",
-      onTranscribe: vi
-        .fn()
-        .mockRejectedValue(new DOMException("Cancelled", "AbortError")),
-      onTranscript: vi.fn(),
+      onTranscribe: transcribe,
+      onTranscript,
     }),
   );
   await act(() => result.current.start());
   vi.advanceTimersByTime(1500);
-  await act(async () => result.current.stop("insert"));
+  await act(async () => {
+    result.current.stop("send");
+  });
+  await act(async () => result.current.cancel());
   expect(result.current.state).toBe("idle");
+  const [kept] = result.current.failedRecordings;
+  expect(kept).toMatchObject({
+    delivery: "send",
+    errorMessage: "Transcription cancelled",
+  });
+  expect(kept?.file).toBe(transcribe.mock.calls[0]?.[0].file);
+  if (!kept) throw new Error("Missing kept recording");
+  await act(async () => result.current.retry(kept));
+  expect(onTranscript).toHaveBeenCalledExactlyOnceWith("Retried words", "send");
   expect(result.current.failedRecordings).toEqual([]);
   expect(appToast.error).not.toHaveBeenCalled();
 });
@@ -455,7 +479,7 @@ it("transcribes an accepted recording when the recorder stops after unmount", as
   expect(appToast.error).not.toHaveBeenCalled();
 });
 
-it("discards a recording when its composer unmounts before acceptance", async () => {
+it("discards a recording when a composer without a draft key unmounts before acceptance", async () => {
   vi.stubGlobal("MediaRecorder", DeferredRecorder);
   const onTranscribe = vi.fn();
   const { result, unmount } = renderHook(() =>
@@ -466,6 +490,31 @@ it("discards a recording when its composer unmounts before acceptance", async ()
   unmount();
   await act(async () => DeferredRecorder.current.finish());
   expect(onTranscribe).not.toHaveBeenCalled();
+});
+
+it("keeps everything recorded so far when its composer unmounts mid-recording", async () => {
+  vi.stubGlobal("MediaRecorder", DeferredRecorder);
+  const onTranscribe = vi.fn();
+  const options = {
+    recordingKey: "thread/unmounted-while-recording",
+    onTranscribe,
+    onTranscript: vi.fn(),
+  };
+  const { result, unmount } = renderHook(() => useVoiceInput(options));
+  await act(() => result.current.start());
+  vi.advanceTimersByTime(1500);
+  DeferredRecorder.current.ondataavailable({ data: new Blob(["early "]) });
+  unmount();
+  await act(async () => DeferredRecorder.current.finish());
+  expect(onTranscribe).not.toHaveBeenCalled();
+
+  const remounted = renderHook(() => useVoiceInput(options));
+  const [kept] = remounted.result.current.failedRecordings;
+  expect(kept).toMatchObject({
+    delivery: "insert",
+    errorMessage: "Recording stopped before it was sent",
+  });
+  expect(await kept?.file.text()).toBe("early recorded audio");
 });
 
 it("aborts transcription when the user cancels it", async () => {
