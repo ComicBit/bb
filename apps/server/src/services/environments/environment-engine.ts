@@ -1680,6 +1680,28 @@ async function runEnvironmentProvisionCommand(
   });
 }
 
+export async function runTrackedEnvironmentProvisionCommand(
+  deps: CommandResultSideEffectsDeps,
+  args: {
+    command: EnvironmentProvisionCommand;
+    hostId: string;
+    timeoutMs: number;
+  },
+): Promise<void> {
+  const command = runLiveHostCommand(deps, args);
+  runTrackedOperation({
+    kind: "attach",
+    map: perDbRegistry(environmentOperations, deps.db),
+    key: args.command.environmentId,
+    run: () =>
+      command.then(
+        () => undefined,
+        () => undefined,
+      ),
+  });
+  await command;
+}
+
 function recoverEnvironmentProvisionRequest(
   deps: CommandResultSideEffectsDeps,
   environment: EnvironmentRow,

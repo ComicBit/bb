@@ -46,6 +46,7 @@ import {
 import { startTestServer, withTestHarness } from "../helpers/test-app.js";
 import type { TestAppHarness } from "../helpers/test-app.js";
 import { setPluginAgentContributions } from "../../src/services/plugins/plugin-agent-contributions.js";
+import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import type { PluginAgentToolRecord } from "../../src/services/plugins/plugin-api.js";
 
 async function postEventBatch(args: {
@@ -1466,6 +1467,91 @@ describe("internal event and tool-call routes", () => {
         scopeKind: "turn",
         turnId: "turn-new-environment",
       });
+    });
+  });
+
+  it("keeps a new unmanaged environment provisioning when the provisioning sweep runs mid-move", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const currentEnvironment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/current-environment",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: currentEnvironment.id,
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: currentEnvironment.id,
+        providerThreadId: "provider-tool-call",
+        sequence: 1,
+        type: "turn/started",
+        scope: turnScope("turn-swept-environment"),
+        data: {
+          providerThreadId: "provider-tool-call",
+        },
+      });
+
+      const responsePromise = postToolCall({
+        harness,
+        sessionId: session.id,
+        threadId: thread.id,
+        turnId: "turn-swept-environment",
+        tool: "update_environment_directory",
+        arguments: { path: "/tmp/swept-unmanaged-worktree" },
+      });
+      const provisionCommand = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "environment.attach" &&
+          command.path === "/tmp/swept-unmanaged-worktree",
+      );
+      if (provisionCommand.command.type !== "environment.attach") {
+        throw new Error("Expected environment.attach command");
+      }
+      const targetEnvironmentId = provisionCommand.command.environmentId;
+
+      await runEnvironmentProvisioningSweep(harness.deps);
+      const statusAfterSweep = getEnvironment(
+        harness.db,
+        targetEnvironmentId,
+      )?.status;
+
+      await reportQueuedCommandSuccess(harness, provisionCommand, {
+        path: "/tmp/swept-unmanaged-worktree",
+        isGitRepo: true,
+        isWorktree: true,
+        branchName: "feature/swept-worktree",
+        defaultBranch: "main",
+        transcript: [],
+      });
+      const response = await responsePromise;
+
+      expect(response.status).toBe(200);
+      await expect(readJson(response)).resolves.toMatchObject({
+        success: true,
+        contentItems: [
+          {
+            type: "inputText",
+            text: expect.stringContaining(
+              "Environment directory updated to /tmp/swept-unmanaged-worktree",
+            ),
+          },
+        ],
+      });
+      expect(statusAfterSweep).toBe("provisioning");
+      expect(getEnvironment(harness.db, targetEnvironmentId)).toMatchObject({
+        path: "/tmp/swept-unmanaged-worktree",
+        status: "ready",
+      });
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(
+        targetEnvironmentId,
+      );
     });
   });
 
