@@ -5077,6 +5077,50 @@ describe("acp bridge: busy agents, restored sessions and stop reasons", () => {
       ]);
     });
 
+    it("sends the instructions again after the agent's context usage drops the way its own compaction does", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      const turn = (text: string) =>
+        completeTurnWith(providerThreadId, text, executionOptions({}));
+
+      await turn("first context-used:28063/100000");
+      await turn("second context-used:17367/100000");
+      await turn("third");
+      await turn("fourth");
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst context-used:28063/100000`,
+        "second context-used:17367/100000",
+        `${instructionsBlock("Be terse.")}\nthird`,
+        "fourth",
+      ]);
+    });
+
+    it("does not take a small usage drop or a new context window size for a compaction", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      const turn = (text: string) =>
+        completeTurnWith(providerThreadId, text, executionOptions({}));
+
+      await turn("first context-used:28000/100000");
+      await turn("second context-used:22000/100000");
+      await turn("third context-used:10000/200000");
+      await turn("fourth");
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst context-used:28000/100000`,
+        "second context-used:22000/100000",
+        "third context-used:10000/200000",
+        "fourth",
+      ]);
+    });
+
     it("does not send the instructions again after a compaction the agent refused", async () => {
       const promptLog = join(workspaceDir, "prompts.log");
       const { providerThreadId } = await startThread({

@@ -226,6 +226,7 @@ interface AcpThreadSession {
   loading: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
+  lastUsageUpdate: AcpUsageUpdate | undefined;
   grokContextWindowSize: number | undefined;
   stopping: boolean;
   turnSettled: Promise<void> | undefined;
@@ -2374,6 +2375,7 @@ async function startAgentSession(
     loading: false,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
+    lastUsageUpdate: undefined,
     grokContextWindowSize: undefined,
     stopping: false,
     turnSettled: undefined,
@@ -2537,6 +2539,7 @@ async function startAgentSession(
         nativeReasoning: params.nativeReasoning,
       });
       const loadUsageUpdate = session.pendingLoadUsageUpdate;
+      session.lastUsageUpdate = loadUsageUpdate;
       session.loading = false;
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
@@ -3401,6 +3404,13 @@ function startCompaction(
     });
 }
 
+const AGENT_COMPACTION_USED_RATIO = 0.75;
+
+function resendInstructionsAfterCompaction(session: AcpThreadSession): void {
+  deliveredInstructionsByProviderThreadId.delete(session.providerThreadId);
+  session.pendingInstructions = session.construction.instructions;
+}
+
 function finishCompaction(
   session: AcpThreadSession,
   outcome: Record<string, unknown>,
@@ -3413,8 +3423,7 @@ function finishCompaction(
     ...outcome,
   });
   if (outcome.status === "completed") {
-    deliveredInstructionsByProviderThreadId.delete(session.providerThreadId);
-    session.pendingInstructions = session.construction.instructions;
+    resendInstructionsAfterCompaction(session);
   }
   setActivePromptKind(session, null);
   session.turnSettled = undefined;
@@ -3525,6 +3534,21 @@ function handleAgentNotification(
     if (chunk.success) {
       session.compactionAgentMessage +=
         extractAcpContentText(chunk.data.content) ?? "";
+    }
+  }
+  if (parsed.data.update.sessionUpdate === "usage_update") {
+    const usage = acpUsageUpdateSchema.safeParse(parsed.data.update);
+    if (usage.success) {
+      const previous = session.lastUsageUpdate;
+      session.lastUsageUpdate = usage.data;
+      if (
+        previous !== undefined &&
+        previous.size === usage.data.size &&
+        session.activePromptKind !== "compaction" &&
+        usage.data.used < previous.used * AGENT_COMPACTION_USED_RATIO
+      ) {
+        resendInstructionsAfterCompaction(session);
+      }
     }
   }
   emitSessionUpdate(session, parsed.data.update, rawUpdate);
