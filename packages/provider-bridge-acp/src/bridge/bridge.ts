@@ -266,6 +266,7 @@ function createBridgeAgentConnection(
 }
 
 const bbThreadIdByProviderThreadId = new Map<string, string>();
+const deliveredInstructionsByProviderThreadId = new Map<string, string>();
 const pendingRuntimeRequests = new Map<
   number,
   (response: BridgeJsonRpcResponse) => void
@@ -1773,6 +1774,10 @@ function buildPromptContentBlocks(
   const instructions = session.pendingInstructions;
   if (instructions) {
     session.pendingInstructions = undefined;
+    deliveredInstructionsByProviderThreadId.set(
+      session.providerThreadId,
+      instructions,
+    );
     blocks.push({
       type: "text",
       text: `<system_instructions>\n${instructions}\n</system_instructions>`,
@@ -2518,7 +2523,12 @@ async function startAgentSession(
         configOptions: loadedConfigOptions,
         models: loadedModels,
       };
-      session.pendingInstructions = undefined;
+      if (
+        deliveredInstructionsByProviderThreadId.get(sessionId) ===
+        params.instructions
+      ) {
+        session.pendingInstructions = undefined;
+      }
       await selectAcpNativeModel({
         session,
         sessionId,
@@ -3394,6 +3404,10 @@ function finishCompaction(
     threadId: session.bbThreadId,
     ...outcome,
   });
+  if (outcome.status === "completed") {
+    deliveredInstructionsByProviderThreadId.delete(session.providerThreadId);
+    session.pendingInstructions = session.construction.instructions;
+  }
   setActivePromptKind(session, null);
   session.turnSettled = undefined;
 }
@@ -3950,6 +3964,9 @@ async function handleRequest(
     }
 
     case "thread/discard":
+      deliveredInstructionsByProviderThreadId.delete(
+        request.params.providerThreadId,
+      );
       sendResult(request.id, { ok: true });
       return;
 
