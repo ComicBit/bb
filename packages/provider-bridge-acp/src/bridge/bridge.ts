@@ -94,6 +94,7 @@ import {
   buildAcpModelListParams,
   buildAcpModelSelectionParams,
   buildAcpSessionParams,
+  buildAcpSessionInstructions,
   type AcpAgentCommandParam,
   type AcpModelListParams,
   type AcpSessionParams,
@@ -3265,6 +3266,13 @@ function reconcileExecutionSettings(
     envVars,
     permissionMode: options.permissionMode,
     workspaceWriteRoots,
+    instructions:
+      options.instructions === undefined
+        ? session.construction.instructions
+        : buildAcpSessionInstructions({
+            ...options,
+            skillRoots: configuredSkillRoots ?? undefined,
+          }),
   };
   const launchModelChanged = !isDeepStrictEqual(
     launchModelSelection(session.construction),
@@ -3953,6 +3961,13 @@ async function handleRequest(
       }
       const reconciled = reconcileExecutionSettings(session, params.options);
       session = reconciled instanceof Promise ? await reconciled : reconciled;
+      if (
+        deliveredInstructionsByProviderThreadId.get(
+          session.providerThreadId,
+        ) !== session.construction.instructions
+      ) {
+        session.pendingInstructions = session.construction.instructions;
+      }
       if (params.options.sessionOptions !== undefined) {
         await applySessionOptionSelections(
           session,
