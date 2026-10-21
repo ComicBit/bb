@@ -5086,14 +5086,14 @@ describe("acp bridge: busy agents, restored sessions and stop reasons", () => {
       const turn = (text: string) =>
         completeTurnWith(providerThreadId, text, executionOptions({}));
 
-      await turn("first context-used:28063/100000");
-      await turn("second context-used:17367/100000");
+      await turn("first context-used:38130/272000");
+      await turn("second context-used:28578/272000");
       await turn("third");
       await turn("fourth");
 
       expect(loggedPrompts(promptLog)).toEqual([
-        `${instructionsBlock("Be terse.")}\nfirst context-used:28063/100000`,
-        "second context-used:17367/100000",
+        `${instructionsBlock("Be terse.")}\nfirst context-used:38130/272000`,
+        "second context-used:28578/272000",
         `${instructionsBlock("Be terse.")}\nthird`,
         "fourth",
       ]);
@@ -5108,14 +5108,14 @@ describe("acp bridge: busy agents, restored sessions and stop reasons", () => {
       const turn = (text: string) =>
         completeTurnWith(providerThreadId, text, executionOptions({}));
 
-      await turn("first context-used:28000/100000");
-      await turn("second context-used:22000/100000");
+      await turn("first context-used:17367/100000");
+      await turn("second context-used:16219/100000");
       await turn("third context-used:10000/200000");
       await turn("fourth");
 
       expect(loggedPrompts(promptLog)).toEqual([
-        `${instructionsBlock("Be terse.")}\nfirst context-used:28000/100000`,
-        "second context-used:22000/100000",
+        `${instructionsBlock("Be terse.")}\nfirst context-used:17367/100000`,
+        "second context-used:16219/100000",
         "third context-used:10000/200000",
         "fourth",
       ]);

@@ -3404,7 +3404,7 @@ function startCompaction(
     });
 }
 
-const AGENT_COMPACTION_USED_RATIO = 0.75;
+const AGENT_COMPACTION_USED_RATIO = 0.85;
 
 function resendInstructionsAfterCompaction(session: AcpThreadSession): void {
   deliveredInstructionsByProviderThreadId.delete(session.providerThreadId);
