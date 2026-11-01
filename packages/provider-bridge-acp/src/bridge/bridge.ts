@@ -217,6 +217,7 @@ interface AcpThreadSession {
   pendingInstructions: string | undefined;
   activePromptKind: "turn" | "compaction" | "agent" | null;
   compactionAgentMessage: string;
+  compactionUsageReceived: boolean;
   queuedInputs: AcpPendingTurnInput[];
   promptRequestPending: boolean;
   cancelRequested: boolean;
@@ -2360,6 +2361,7 @@ async function startAgentSession(
     pendingInstructions: params.instructions,
     activePromptKind: null,
     compactionAgentMessage: "",
+    compactionUsageReceived: false,
     queuedInputs: [],
     promptRequestPending: false,
     cancelRequested: false,
@@ -3337,6 +3339,7 @@ function startCompaction(
   setActivePromptKind(session, "compaction");
   session.awaitingFirstPrompt = false;
   session.compactionAgentMessage = "";
+  session.compactionUsageReceived = false;
   emitForSession(session, ACP_COMPACTION_STARTED_METHOD, {
     threadId: session.bbThreadId,
   });
@@ -3361,18 +3364,36 @@ function startCompaction(
       if (grokUsage !== undefined) {
         emitGrokContextWindow(session, grokUsage.used);
       }
-      finish(
+      const outcome =
         result.stopReason === "end_turn"
           ? compactionOutcomeForEndTurn(
               session.dialect,
               session.compactionAgentMessage,
             )
           : result.stopReason === "cancelled"
-            ? { status: "interrupted" }
-            : {
+            ? ({ status: "interrupted" } as const)
+            : ({
                 status: "failed",
                 error: `Agent stopped compaction: ${result.stopReason}`,
-              },
+              } as const);
+      if (
+        outcome.status === "completed" &&
+        outcome.usedTokens !== undefined &&
+        !session.compactionUsageReceived
+      ) {
+        const cost = session.model.snapshot().usage?.cost ?? undefined;
+        sendThreadDeltas(session.bbThreadId, [
+          {
+            kind: "contextWindow",
+            used: outcome.usedTokens,
+            estimated: false,
+            attach: "open",
+            ...(cost === undefined ? {} : { cost }),
+          },
+        ]);
+      }
+      finish(
+        outcome.status === "completed" ? { status: "completed" } : outcome,
       );
     })
     .catch((error: unknown) => {
@@ -3497,6 +3518,9 @@ function handleAgentNotification(
     }
   }
   if (session.activePromptKind === "compaction") {
+    if (acpUsageUpdateSchema.safeParse(parsed.data.update).success) {
+      session.compactionUsageReceived = true;
+    }
     const chunk = acpAgentMessageChunkUpdateSchema.safeParse(
       parsed.data.update,
     );

@@ -571,6 +571,13 @@ async function handlePrompt(message) {
     if (compactMessage !== undefined) {
       notifyUpdate(messageChunk(compactMessage));
     }
+    if (process.env.FAKE_ACP_COMPACT_USAGE === "1") {
+      notifyUpdate({
+        sessionUpdate: "usage_update",
+        used: 24_000,
+        size: 1_000_000,
+      });
+    }
   } else if (text.includes("request-external-directory-permission")) {
     // opencode's external_directory permission: the running edit tool asks
     // with the generic kind "other", a bare directory title, and
