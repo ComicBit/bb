@@ -39,6 +39,7 @@ interface BottomAnchoredScrollBodyProps {
   contentClassName?: string;
   maxWidthClassName: string;
   scrollAnchorThreadId?: string;
+  historyCollapsed?: boolean;
 }
 
 interface ScrollElementIntoViewArgs {
@@ -230,6 +231,7 @@ export function BottomAnchoredScrollBody({
   scrollOverlay,
   children,
   scrollAnchorThreadId,
+  historyCollapsed = false,
 }: BottomAnchoredScrollBodyProps) {
   const store = useStore();
   const isPointerCoarse = usePointerCoarse();
@@ -952,7 +954,12 @@ export function BottomAnchoredScrollBody({
       <TimelineScrollRestoreRowIdContext.Provider
         value={initialScrollRestoreRowId}
       >
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
+        <div
+          className={cn(
+            "grid min-h-0 grid-rows-[minmax(auto,1fr)] overflow-hidden",
+            !historyCollapsed && "flex-1",
+          )}
+        >
           <div
             ref={scrollAreaRef}
             data-page-scroll-viewport=""
@@ -963,14 +970,19 @@ export function BottomAnchoredScrollBody({
           >
             <div
               ref={scrollContentRef}
-              className="flex min-h-full min-w-0 flex-col"
+              className={cn(
+                "flex min-w-0 flex-col",
+                !historyCollapsed && "min-h-full",
+              )}
             >
               {}
               <div
+                hidden={historyCollapsed}
                 className={cn(
                   "mx-auto flex w-full min-w-0 flex-1 flex-col px-4 pb-4 pt-2",
                   maxWidthClassName,
                   contentClassName,
+                  historyCollapsed && "hidden",
                   isAtBottom &&
                     supportsScrollAnchoring() &&
                     "scroll-bottom-anchor-content",
@@ -979,7 +991,11 @@ export function BottomAnchoredScrollBody({
               >
                 {children}
               </div>
-              <div className="scroll-bottom-anchor" aria-hidden />
+              <div
+                className="scroll-bottom-anchor"
+                aria-hidden
+                hidden={historyCollapsed}
+              />
               {footer ? (
                 <div
                   data-scroll-footer=""

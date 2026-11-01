@@ -116,6 +116,8 @@ export const definePluginApp: PluginSdkApp["definePluginApp"] = (setup) => {
   return Object.freeze({ __bbPluginApp: true as const, setup });
 };
 export const ThreadChat = runtimeComponent("ThreadChat");
+export const experimental_supportsThreadChatHistoryCollapse = (): boolean =>
+  installedApp()?.experimental_supportsThreadChatHistoryCollapse?.() ?? false;
 export const Markdown = runtimeComponent("Markdown");
 export const experimental_FileLink = runtimeComponent("experimental_FileLink");
 export const UrlLink = runtimeComponent("UrlLink");

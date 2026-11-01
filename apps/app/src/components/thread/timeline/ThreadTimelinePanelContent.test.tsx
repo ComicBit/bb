@@ -4,7 +4,10 @@ import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ThreadRuntimeDisplayStatus } from "@bb/domain";
-import type { TimelineWorkflowWorkRow } from "@bb/server-contract";
+import type {
+  TimelineConversationRow,
+  TimelineWorkflowWorkRow,
+} from "@bb/server-contract";
 import { ThreadTimelinePanelContent } from "./ThreadTimelinePanelContent.js";
 import type { UseThreadTimelineControllerResult } from "./useThreadTimelineController.js";
 
@@ -124,6 +127,71 @@ afterEach(() => {
 });
 
 describe("ThreadTimelinePanelContent", () => {
+  it("observes new nested replies without treating streamed text changes as new messages", () => {
+    const onHistoryActivity = vi.fn();
+    const reply = (sequence: number, text: string): Extract<TimelineConversationRow, { role: "assistant" }> => ({
+      id: `message-${sequence}`,
+      threadId: "thr-test",
+      turnId: "turn-test",
+      sourceSeqStart: sequence,
+      sourceSeqEnd: sequence,
+      startedAt: 1,
+      createdAt: 1,
+      kind: "conversation",
+      role: "assistant",
+      text,
+      attachments: null,
+      turnRequest: null,
+    });
+    const timeline = baseTimeline({
+      timelineRows: [{
+        id: "turn-test",
+        threadId: "thr-test",
+        turnId: "turn-test",
+        sourceSeqStart: 1,
+        sourceSeqEnd: 10,
+        startedAt: 1,
+        createdAt: 1,
+        kind: "turn",
+        status: "pending",
+        summaryCount: 0,
+        completedAt: null,
+        children: [reply(10, "First words")],
+      }],
+    });
+    const view = render(
+      <ThreadTimelinePanelContent
+        threadId="thr-test"
+        timeline={timeline}
+        onHistoryActivity={onHistoryActivity}
+      />,
+    );
+    expect(onHistoryActivity).toHaveBeenCalledExactlyOnceWith(10, false, true);
+    onHistoryActivity.mockClear();
+    const turn = timeline.timelineRows[0];
+    if (turn?.kind !== "turn") throw new Error("Missing turn fixture");
+    view.rerender(
+      <ThreadTimelinePanelContent
+        threadId="thr-test"
+        timeline={baseTimeline({
+          timelineRows: [{ ...turn, children: [reply(10, "First words still streaming")] }],
+        })}
+        onHistoryActivity={onHistoryActivity}
+      />,
+    );
+    expect(onHistoryActivity).not.toHaveBeenCalled();
+    view.rerender(
+      <ThreadTimelinePanelContent
+        threadId="thr-test"
+        timeline={baseTimeline({
+          timelineRows: [{ ...turn, children: [reply(10, "Finished reply"), reply(20, "New reply")] }],
+        })}
+        onHistoryActivity={onHistoryActivity}
+      />,
+    );
+    expect(onHistoryActivity).toHaveBeenCalledExactlyOnceWith(20, false, true);
+  });
+
   it("shows a background-only working indicator while runtime is idle", () => {
     render(
       <ThreadTimelinePanelContent

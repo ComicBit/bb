@@ -23,6 +23,7 @@ import type {
 } from "@/components/promptbox/PromptBoxInternal";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import { cn } from "@bb/shared-ui/lib/utils";
+import { Button } from "@bb/shared-ui/button";
 import { BottomAnchoredScrollBody } from "@/components/ui/bottom-anchored-scroll-body";
 import { PageShell } from "@/components/ui/page-shell.js";
 import {
@@ -142,6 +143,8 @@ interface EmbeddedThreadChatComposerModeProps extends EmbeddedThreadChatSharedPr
   surfaceTone?: "background" | "sidebar";
   composer: EmbeddedThreadChatComposerProps;
   footer?: never;
+  historyCollapsed?: boolean;
+  onHistoryCollapsedChange?: (collapsed: boolean) => void;
 }
 
 interface EmbeddedThreadChatHostedFooterProps {
@@ -205,6 +208,8 @@ function EmbeddedThreadChatWithComposer({
   measure = "panel",
   surfaceTone = "background",
   composer,
+  historyCollapsed,
+  onHistoryCollapsedChange,
 }: EmbeddedThreadChatComposerModeProps) {
   const systemConfigQuery = useSystemConfig();
   const steerActiveThreadOnEnter =
@@ -216,6 +221,31 @@ function EmbeddedThreadChatWithComposer({
   const sendThreadMessage = useSendThreadMessage();
   const createQueuedMessage = useCreateThreadQueuedMessage();
   const threadQuery = useThread(threadId);
+  const historyCollapseEnabled = historyCollapsed !== undefined;
+  const [historyUnavailable, setHistoryUnavailable] = useState(false);
+  const historyObservationRef = useRef<{
+    threadId: string;
+    sequence: number;
+  } | null>(null);
+  const expandHistory = useCallback(() => {
+    onHistoryCollapsedChange?.(false);
+  }, [onHistoryCollapsedChange]);
+  const handleHistoryActivity = useCallback(
+    (sequence: number, unavailable: boolean, loaded: boolean) => {
+      setHistoryUnavailable(unavailable);
+      if (!loaded) return;
+      const previous = historyObservationRef.current;
+      historyObservationRef.current = { threadId, sequence };
+      if (
+        previous?.threadId === threadId &&
+        sequence > previous.sequence &&
+        historyCollapsed
+      ) {
+        expandHistory();
+      }
+    },
+    [expandHistory, historyCollapsed, threadId],
+  );
   const pendingInteractionsQuery = useThreadPendingInteractions(threadId);
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
@@ -467,6 +497,7 @@ function EmbeddedThreadChatWithComposer({
       if (input.length === 0) {
         throw new Error("Type a message before submitting it.");
       }
+      expandHistory();
       const clearedSubmittedDraft =
         promptDraft.clearIfCurrentMatches(submittedDraft);
       setBottomAttachmentError(null);
@@ -500,6 +531,7 @@ function EmbeddedThreadChatWithComposer({
     },
     [
       executionRequestFields,
+      expandHistory,
       promptDraft,
       sendThreadMessage,
       setBottomAttachmentError,
@@ -513,6 +545,7 @@ function EmbeddedThreadChatWithComposer({
     if (submittedInput.length === 0 || isTurnSubmitting) {
       return;
     }
+    expandHistory();
     promptDraft.clearIfCurrentMatches(submittedDraft);
     setBottomAttachmentError(null);
     setIsTurnSubmitting(true);
@@ -540,6 +573,7 @@ function EmbeddedThreadChatWithComposer({
     currentPromptDraftInput,
     defaultSendOrQueueInput,
     displayStatus,
+    expandHistory,
     isTurnSubmitting,
     promptDraft,
     setBottomAttachmentError,
@@ -549,13 +583,14 @@ function EmbeddedThreadChatWithComposer({
     queuedMessageActionPending || createQueuedMessage.isPending;
   const handleSendQueuedMessage = useCallback(
     (queuedMessageId: string) => {
+      expandHistory();
       void sendQueuedMessageById({
         guard: "exists",
         messageId: queuedMessageId,
         mode: isProvisioning ? "steer" : "auto",
       });
     },
-    [isProvisioning, sendQueuedMessageById],
+    [expandHistory, isProvisioning, sendQueuedMessageById],
   );
   const hasPromptDraftInput = currentPromptDraftInput.length > 0;
   const canSubmitModifierShortcut = canSubmitFollowUpShortcut({
@@ -570,6 +605,7 @@ function EmbeddedThreadChatWithComposer({
     if (!canSubmitModifierShortcut) {
       return;
     }
+    expandHistory();
 
     const submittedDraft = currentPromptDraft;
     const submittedInput = currentPromptDraftInput;
@@ -619,6 +655,7 @@ function EmbeddedThreadChatWithComposer({
     currentPromptDraft,
     currentPromptDraftInput,
     executionRequestFields,
+    expandHistory,
     promptDraft,
     queuedMessages,
     sendQueuedMessageById,
@@ -1172,7 +1209,8 @@ function EmbeddedThreadChatWithComposer({
 
   const queuedMessagesStack = useMemo(
     () =>
-      queuedMessages.length > 0 && !hasComposerBlockingPendingInteraction ? (
+      queuedMessages.length > 0 &&
+      (!hasComposerBlockingPendingInteraction || historyCollapseEnabled) ? (
         <LazyQueuedMessagesList
           attachedToComposer
           queuedMessages={queuedMessages}
@@ -1203,6 +1241,7 @@ function EmbeddedThreadChatWithComposer({
       processingQueuedMessage?.action,
       processingQueuedMessage?.id,
       hasComposerBlockingPendingInteraction,
+      historyCollapseEnabled,
       queuedMessageActionPending,
       queuedMessages,
       resolveMentionLink,
@@ -1222,6 +1261,67 @@ function EmbeddedThreadChatWithComposer({
     <div className={cn("relative", surfaceClassName)}>
       <OverflowFade placement="above" tone={surfaceTone} />
       <div className="px-4 pb-4 pt-2">
+        {historyCollapsed &&
+        (historyUnavailable ||
+          threadQuery.isError ||
+          displayStatus === "error" ||
+          pendingInteractionsQuery.isError) ? (
+          <div
+            role="alert"
+            className="mb-2 flex items-center justify-between gap-3 text-sm text-destructive-text"
+          >
+            <span>
+              {pendingInteractionsQuery.isError
+                ? "Couldn't check pending interactions."
+                : historyUnavailable
+                  ? "Couldn't load conversation history."
+                  : threadQuery.isError
+                    ? "Couldn't load thread status."
+                    : "Thread execution failed."}
+            </span>
+            {pendingInteractionsQuery.isError ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={pendingInteractionsQuery.isFetching}
+                onClick={() => void pendingInteractionsQuery.refetch()}
+              >
+                Retry
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={expandHistory}
+              >
+                Show conversation
+              </Button>
+            )}
+          </div>
+        ) : null}
+        {historyCollapseEnabled && activePendingInteraction?.payload.kind === "plugin" ? (
+          <ThreadPendingInteractionBanner
+            interaction={activePendingInteraction}
+            threadId={threadId}
+          />
+        ) : null}
+        {historyCollapseEnabled &&
+        submitMode.kind === "blocked" &&
+        shouldQueueFollowUpMessage(displayStatus) ? (
+          <div className="mb-2 flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={isStopRequested}
+              onClick={handleStopThread}
+            >
+              {isStopRequested ? "Stopping…" : "Stop"}
+            </Button>
+          </div>
+        ) : null}
         <FollowUpPromptBox
           attachments={bottomAttachmentsConfig}
           stack={queuedMessagesStack}
@@ -1265,6 +1365,7 @@ function EmbeddedThreadChatWithComposer({
       resolveMentionLink={resolveMentionLink}
       threadId={threadId}
       workspaceRootPath={workspaceRootPath}
+      onHistoryActivity={historyCollapseEnabled ? handleHistoryActivity : undefined}
     />
   );
 
@@ -1277,10 +1378,12 @@ function EmbeddedThreadChatWithComposer({
         className={cn("flex min-w-0 flex-col", surfaceClassName)}
       >
         <div
+          hidden={historyCollapsed}
           className={cn(
             "mx-auto flex w-full min-w-0 flex-col",
             measure === "page" ? "px-4 pb-3 pt-3" : "px-2 pb-3 pt-3",
             maxWidthClassName,
+            historyCollapsed && "hidden",
           )}
         >
           {timelineBody}
@@ -1294,7 +1397,7 @@ function EmbeddedThreadChatWithComposer({
     <div
       data-thread-window=""
       data-surface-tone={surfaceTone}
-      className="flex min-h-0 flex-1 flex-col"
+      className={cn("flex min-h-0 flex-col", !historyCollapsed && "flex-1")}
     >
       <BottomAnchoredScrollBody
         key={surfaceKey}
@@ -1305,6 +1408,7 @@ function EmbeddedThreadChatWithComposer({
         maxWidthClassName={maxWidthClassName}
         footer={footer}
         scrollAnchorThreadId={threadId}
+        historyCollapsed={historyCollapsed}
       >
         {timelineBody}
       </BottomAnchoredScrollBody>

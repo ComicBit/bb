@@ -81,6 +81,7 @@ export const pluginSdkAppImplementation = {
   useRpc,
   useSettings,
   ThreadChat: LazyPluginThreadChat,
+  experimental_supportsThreadChatHistoryCollapse: () => true,
   Markdown: PluginMarkdown,
   experimental_FileLink: ExperimentalFileLink,
   UrlLink: PluginUrlLink,

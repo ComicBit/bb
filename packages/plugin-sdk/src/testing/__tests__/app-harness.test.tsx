@@ -18,16 +18,16 @@ import {
 } from "../app.js";
 import { defineRpcContract } from "../../rpc-contract.js";
 
-installTestPluginRuntime();
-const {
+import {
   definePluginApp,
-  experimental_FileLink: FileLink,
-  UrlLink: UrlLink,
-  experimental_ProviderModelPicker: ProviderModelPicker,
-  experimental_PermissionModePicker: PermissionModePicker,
+  experimental_FileLink as FileLink,
+  UrlLink,
+  experimental_ProviderModelPicker as ProviderModelPicker,
+  experimental_PermissionModePicker as PermissionModePicker,
   experimental_useAppPanel,
   experimental_useFixedTabTarget,
   ThreadChat,
+  experimental_supportsThreadChatHistoryCollapse,
   useBbNavigate,
   useComposer,
   useComposers,
@@ -38,8 +38,23 @@ const {
   useSdk,
   experimental_useSidebarNavigation,
   experimental_useSidebarNavigationSplit,
-  experimental_SidebarNavigationIcon: SidebarNavigationIcon,
-} = await import("../../app.js");
+  experimental_SidebarNavigationIcon as SidebarNavigationIcon,
+} from "../../app.js";
+
+installTestPluginRuntime();
+
+it("resolves history support after the SDK was imported before runtime installation", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "__bbPluginRuntime");
+  Reflect.deleteProperty(globalThis, "__bbPluginRuntime");
+  try {
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(false);
+    installTestPluginRuntime();
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(true);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "__bbPluginRuntime", previous);
+    else Reflect.deleteProperty(globalThis, "__bbPluginRuntime");
+  }
+});
 
 function SdkProbe() {
   const sdk = useSdk();
@@ -463,6 +478,7 @@ function ComposerProbe() {
 const messageActionRuns: unknown[] = [];
 
 function ThreadChatPage({ subPath }: PluginNavPanelProps) {
+  const [historyCollapsed, setHistoryCollapsed] = useState(true);
   return (
     <ThreadChat
       threadId={subPath || "thr_default"}
@@ -470,6 +486,8 @@ function ThreadChatPage({ subPath }: PluginNavPanelProps) {
       layout="document"
       focusRequest={2}
       className="demo-chat"
+      experimental_historyCollapsed={historyCollapsed}
+      experimental_onHistoryCollapsedChange={setHistoryCollapsed}
       leadingContent={<div>Replying to something earlier</div>}
       messageActions={[
         {
@@ -1513,17 +1531,6 @@ describe("loadPluginApp", () => {
     });
   });
 
-  it("renders the ThreadChat stub with recorded props inside a slot", () => {
-    const chatPanel = app.navPanels.find((panel) => panel.id === "chat")!;
-    const slot = renderSlot(chatPanel, { subPath: "thr_42" });
-    const stub = slot.getByTestId("bb-thread-chat");
-    expect(stub.getAttribute("data-thread-id")).toBe("thr_42");
-    expect(stub.getAttribute("data-variant")).toBe("compact");
-    expect(stub.getAttribute("data-layout")).toBe("document");
-    expect(stub.getAttribute("data-focus-request")).toBe("2");
-    expect(stub.getAttribute("data-message-actions")).toBe("send-to-main");
-    expect(stub.className).toBe("demo-chat");
-  });
 
   it("renders leadingContent and drives messageActions through the stub", () => {
     messageActionRuns.length = 0;

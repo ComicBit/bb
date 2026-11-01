@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
+import type { TimelineRow } from "@bb/server-contract";
 import { isRunningThreadRuntimeDisplayStatus } from "@bb/client-core";
 import { EmptyStatePanel } from "@bb/shared-ui/empty-state";
 import { Skeleton } from "@bb/shared-ui/skeleton";
@@ -30,6 +31,11 @@ interface ThreadTimelinePanelContentProps {
   threadId: string;
   timeline?: UseThreadTimelineControllerResult;
   workspaceRootPath?: string;
+  onHistoryActivity?: (
+    latestConversationSequence: number,
+    unavailable: boolean,
+    loaded: boolean,
+  ) => void;
 }
 
 export function ThreadTimelinePanelContent({
@@ -47,6 +53,7 @@ export function ThreadTimelinePanelContent({
   threadId,
   timeline,
   workspaceRootPath,
+  onHistoryActivity,
 }: ThreadTimelinePanelContentProps) {
   const threadQuery = useThread(threadId);
   const ownedTimeline = useThreadTimelineController({
@@ -80,6 +87,23 @@ export function ThreadTimelinePanelContent({
   const isChildThreadMissing =
     threadQuery.error instanceof BbHttpError &&
     threadQuery.error.status === 404;
+  const latestConversationSequence = onHistoryActivity
+    ? getLatestConversationSequence(timelineRows)
+    : 0;
+  const historyUnavailable = Boolean(resolvedTimeline.timelineError);
+  const historyLoaded = !resolvedTimeline.timelineLoading && !historyUnavailable;
+  useEffect(() => {
+    onHistoryActivity?.(
+      latestConversationSequence,
+      historyUnavailable,
+      historyLoaded,
+    );
+  }, [
+    historyLoaded,
+    historyUnavailable,
+    latestConversationSequence,
+    onHistoryActivity,
+  ]);
 
   if (isChildThreadMissing) {
     return (
@@ -126,6 +150,18 @@ export function ThreadTimelinePanelContent({
       workspaceRootPath={workspaceRootPath}
     />
   );
+}
+
+function getLatestConversationSequence(rows: readonly TimelineRow[]): number {
+  let latest = 0;
+  for (const row of rows) {
+    if (row.kind === "conversation") {
+      latest = Math.max(latest, row.sourceSeqStart);
+    } else if (row.kind === "turn" && row.children !== null) {
+      latest = Math.max(latest, getLatestConversationSequence(row.children));
+    }
+  }
+  return latest;
 }
 
 function ThreadTimelinePanelLoadingSkeleton() {

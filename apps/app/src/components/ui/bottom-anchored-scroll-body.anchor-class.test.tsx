@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BottomAnchoredScrollBody } from "@/components/ui/bottom-anchored-scroll-body";
@@ -94,5 +94,46 @@ describe("BottomAnchoredScrollBody grid", () => {
         expect.arrayContaining(["row-start-1", "col-start-1", "min-h-0"]),
       );
     }
+  });
+});
+
+describe("BottomAnchoredScrollBody history collapse", () => {
+  it("retains history and a focused native footer while removing history from interaction", () => {
+    vi.stubGlobal("CSS", { supports: () => false });
+    const body = (historyCollapsed: boolean) => (
+      <BottomAnchoredScrollBody
+        footer={
+          <div>
+            <input aria-label="Message" defaultValue="Draft with an attachment" />
+            <button type="button">Stop</button>
+            <button type="button">Review permission</button>
+            <button type="button">Edit queued message</button>
+          </div>
+        }
+        maxWidthClassName="max-w-none"
+        scrollAnchorThreadId="thread-collapse"
+        historyCollapsed={historyCollapsed}
+      >
+        <button type="button">Earlier message action</button>
+      </BottomAnchoredScrollBody>
+    );
+    const view = render(body(false));
+    const editor = screen.getByRole("textbox", { name: "Message" }) as HTMLInputElement;
+    const earlierAction = screen.getByRole("button", { name: "Earlier message action" });
+    editor.focus();
+    editor.setSelectionRange(3, 7);
+    view.rerender(body(true));
+    expect(screen.queryByRole("button", { name: "Earlier message action" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Earlier message action", hidden: true })).toBe(earlierAction);
+    expect(screen.getByRole("textbox", { name: "Message" })).toBe(editor);
+    expect(document.activeElement).toBe(editor);
+    expect(editor.selectionStart).toBe(3);
+    expect(editor.selectionEnd).toBe(7);
+    for (const name of ["Stop", "Review permission", "Edit queued message"]) {
+      expect(screen.getByRole("button", { name }).closest("[hidden]")).toBeNull();
+    }
+    view.rerender(body(false));
+    expect(screen.getByRole("button", { name: "Earlier message action" })).toBe(earlierAction);
+    expect(screen.getByRole("textbox", { name: "Message" })).toBe(editor);
   });
 });

@@ -7,7 +7,8 @@ Host components:
   settings sections). This is the deliberate exception to the
   no-host-components rule: a stable product capability, not a UI kit. Props:
   `{ threadId, variant?, layout?, focusRequest?, permissionPolicy?,
-className?, leadingContent?, messageActions? }` —
+className?, leadingContent?, messageActions?, experimental_historyCollapsed?,
+experimental_onHistoryCollapsedChange? }` —
   `variant` is `"full"` (standard chat controls, default), `"compact"`
   (side-panel presentation), or `"timeline"` (transcript without a
   composer); `layout` is `"contained"` (fills and scrolls within the
@@ -31,6 +32,12 @@ className?, leadingContent?, messageActions? }` —
   host owns timeline loading, streaming, drafts, send/queue/steer/stop,
   attachments, execution controls, pending interactions, and read tracking —
   do not proxy thread data through your own RPC or rebuild the composer.
+  `experimental_historyCollapsed` hides only the history in full/compact instances;
+  the composer, draft, queue, streaming state, permissions and pending interactions
+  remain mounted. New submissions expand history and notify
+  `experimental_onHistoryCollapsedChange(false)`. Before relying on this native
+  behavior, call `experimental_supportsThreadChatHistoryCollapse()` from the app
+  module after runtime installation; import-time capability snapshots are invalid.
 - `experimental_ProviderModelPicker` — bb's controlled provider, model, and
   reasoning picker. Props:
   `{ value: { providerId, model, reasoningLevel, serviceTier? }, onChange,

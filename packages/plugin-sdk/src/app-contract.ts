@@ -2909,6 +2909,17 @@ export interface ThreadChatProps {
    * {@link ThreadChatMessageAction}).
    */
   messageActions?: readonly ThreadChatMessageAction[];
+  /**
+   * Collapse only history while retaining the same native conversation and
+   * composer, including drafts, attachments, mentions and footer controls.
+   * Ignored by the timeline-only variant; omitted preserves existing behavior.
+   */
+  experimental_historyCollapsed?: boolean;
+  /**
+   * Requests expansion on a new conversation message or native submission.
+   * Apply the requested value to experimental_historyCollapsed in the caller.
+   */
+  experimental_onHistoryCollapsedChange?: (collapsed: boolean) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -3587,6 +3598,8 @@ export interface PluginSdkApp {
    * stays vendored per §5.5.
    */
   ThreadChat: ComponentType<ThreadChatProps>;
+  /** Resolve current host history-collapse support, including after late runtime installation. */
+  experimental_supportsThreadChatHistoryCollapse(): boolean;
   /**
    * The host-owned chat-message markdown renderer (see
    * {@link MarkdownProps}).

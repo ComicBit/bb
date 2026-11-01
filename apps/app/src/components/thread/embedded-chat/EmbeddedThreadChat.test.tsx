@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   sendQueuedMessageMutateAsync: vi.fn(),
   sendThreadMessageMutateAsync: vi.fn(),
   threadRuntimeDisplayStatus: "idle" as string,
+  stopThreadMutate: vi.fn(),
   timelineRows: [] as Array<{ text: string }>,
   injectedTimelineProps: [] as Array<unknown>,
   timelinePanelProps: [] as Array<Record<string, unknown>>,
@@ -141,16 +142,20 @@ vi.mock("@/components/ui/bottom-anchored-scroll-body", () => ({
     children,
     footer,
     scrollAreaClassName,
+    historyCollapsed,
   }: {
     children: ReactNode;
     footer: ReactNode;
     scrollAreaClassName: string;
+    historyCollapsed?: boolean;
   }) => (
     <div
       data-testid="embedded-chat-scroll-area"
       className={scrollAreaClassName}
     >
-      {children}
+      <div data-testid="embedded-chat-history" hidden={historyCollapsed}>
+        {children}
+      </div>
       {footer}
     </div>
   ),
@@ -164,10 +169,16 @@ vi.mock("@/components/ui/overflow-fade", () => ({
 
 vi.mock("@/components/thread/timeline", () => ({
   isRunningThreadRuntimeDisplayStatus: (status: string) => status === "active",
-  ThreadTimelinePanelContent: (props: Record<string, unknown>) => {
+  ThreadTimelinePanelContent: (props: Record<string, unknown> & {
+    onHistoryActivity?: (sequence: number, unavailable: boolean, loaded: boolean) => void;
+  }) => {
     mocks.timelinePanelProps.push(props);
     mocks.injectedTimelineProps.push(props.timeline);
     mocks.timelineProjectIds.push(props.projectId as string | undefined);
+    const sequence = mocks.timelineRows.length;
+    useEffect(() => {
+      props.onHistoryActivity?.(sequence, false, true);
+    }, [props.onHistoryActivity, sequence]);
     return (
       <div>
         {mocks.timelineRows.map((row, index) => (
@@ -256,6 +267,7 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
     isError: mocks.pendingInteractionsIsError,
     isFetching: mocks.pendingInteractionsIsFetching,
     isLoading: mocks.pendingInteractionsIsLoading,
+    refetch: vi.fn(),
   }),
   getLatestPendingInteraction: (
     interactions: readonly { createdAt: number }[] | undefined,
@@ -308,7 +320,7 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
     isPending: false,
   }),
   useStopThread: () => ({
-    mutate: vi.fn(),
+    mutate: mocks.stopThreadMutate,
     isPending: false,
     variables: undefined,
   }),
@@ -354,15 +366,24 @@ function buildEmbeddedChat({
   threadId = "thr_child",
   surfaceTone = "background",
   pluginComposerBottomScope,
+  historyCollapsed,
+  onHistoryCollapsedChange,
+  layout,
 }: {
   threadId?: string;
   surfaceTone?: "background" | "sidebar";
   pluginComposerBottomScope?: PluginComposerHost["scope"];
+  historyCollapsed?: boolean;
+  onHistoryCollapsedChange?: (collapsed: boolean) => void;
+  layout?: "contained" | "document";
 } = {}) {
   return (
     <EmbeddedThreadChat
       variant="compact"
       surfaceTone={surfaceTone}
+      historyCollapsed={historyCollapsed}
+      onHistoryCollapsedChange={onHistoryCollapsedChange}
+      layout={layout}
       threadId={threadId}
       projectId="proj-1"
       providerId="provider-1"
@@ -409,6 +430,7 @@ describe("EmbeddedThreadChat", () => {
     mocks.queuedMessages = [];
     mocks.sendQueuedMessageMutateAsync.mockReset().mockResolvedValue({});
     mocks.threadRuntimeDisplayStatus = "idle";
+    mocks.stopThreadMutate.mockReset();
     mocks.timelineRows = [];
     mocks.injectedTimelineProps = [];
     mocks.timelinePanelProps = [];
@@ -417,6 +439,100 @@ describe("EmbeddedThreadChat", () => {
     hostDraftMocks.latestHost = null;
     hostDraftMocks.textAtNotify = [];
     hostDraftMocks.subscribed = false;
+  });
+
+  it.each(["contained", "document"] as const)(
+    "preserves the mounted composer, focused draft, mentions and attachments across %s history collapse",
+    (layout) => {
+      const draft = {
+        text: "@thread:thr_source review",
+        mentions: [{
+          start: 0,
+          end: 18,
+          resource: {
+            kind: "thread" as const,
+            threadId: "thr_source",
+            label: "Source",
+          },
+        }],
+        attachments: [{
+          type: "localFile" as const,
+          path: "/attachments/review.txt",
+          name: "review.txt",
+          sizeBytes: 12,
+        }],
+      };
+      const accessor = getPromptDraftAccessor({
+        kind: "thread",
+        projectId: "proj-1",
+        threadId: "thr_child",
+      });
+      accessor.setDraft(draft);
+      const options = { layout, historyCollapsed: false };
+      const view = renderEmbeddedChat(options);
+      const composer = screen.getByTestId("embedded-chat-composer") as HTMLInputElement;
+      composer.focus();
+      composer.setSelectionRange(4, 9);
+      view.rerender(buildEmbeddedChat({ ...options, historyCollapsed: true }));
+      expect(screen.getByTestId("embedded-chat-composer")).toBe(composer);
+      expect(document.activeElement).toBe(composer);
+      expect(composer.selectionStart).toBe(4);
+      expect(composer.selectionEnd).toBe(9);
+      expect(accessor.getCurrent()).toEqual(draft);
+      view.rerender(buildEmbeddedChat(options));
+      expect(screen.getByTestId("embedded-chat-composer")).toBe(composer);
+      expect(accessor.getCurrent()).toEqual(draft);
+    },
+  );
+
+  it("expands new replies and submission without repeatedly reopening a manually collapsed streaming reply", () => {
+    const onHistoryCollapsedChange = vi.fn();
+    mocks.timelineRows = [{ text: "Existing reply" }];
+    const options = { historyCollapsed: true, onHistoryCollapsedChange };
+    const view = renderEmbeddedChat(options);
+    expect(onHistoryCollapsedChange).not.toHaveBeenCalled();
+    mocks.timelineRows = [{ text: "Existing reply" }, { text: "New reply" }];
+    view.rerender(buildEmbeddedChat(options));
+    expect(onHistoryCollapsedChange).toHaveBeenCalledExactlyOnceWith(false);
+    onHistoryCollapsedChange.mockClear();
+    mocks.timelineRows = [{ text: "Existing reply" }, { text: "New reply still streaming" }];
+    view.rerender(buildEmbeddedChat(options));
+    expect(onHistoryCollapsedChange).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
+      target: { value: "Next question" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(onHistoryCollapsedChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("keeps permission, disabled queued-input actions and Stop accessible while collapsed", () => {
+    mocks.threadRuntimeDisplayStatus = "active";
+    mocks.pendingInteractions = [
+      { id: "int_1", createdAt: 1, payload: { kind: "approval" } },
+    ];
+    mocks.queuedMessages = [{ id: "q1" }];
+    renderEmbeddedChat({ historyCollapsed: true });
+    expect(screen.getByTestId("pending-interaction-banner").closest("[hidden]")).toBeNull();
+    expect(screen.getByTestId("embedded-chat-queued-messages").closest("[hidden]")).toBeNull();
+    expect(screen.getByTestId("embedded-chat-queued-messages").dataset.sendDisabled).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(mocks.stopThreadMutate).toHaveBeenCalledExactlyOnceWith("thr_child");
+  });
+
+  it("preserves a native plugin interaction form through collapse and exposes execution errors", () => {
+    mocks.pendingInteractions = [
+      { id: "int_plugin", createdAt: 1, payload: { kind: "plugin" } },
+    ];
+    const options = { historyCollapsed: false, onHistoryCollapsedChange: vi.fn() };
+    const view = renderEmbeddedChat(options);
+    const interaction = screen.getByTestId("pending-interaction-banner");
+    mocks.threadRuntimeDisplayStatus = "error";
+    view.rerender(buildEmbeddedChat({ ...options, historyCollapsed: true }));
+    expect(screen.getByTestId("pending-interaction-banner")).toBe(interaction);
+    expect(interaction.closest("[hidden]")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Thread execution failed");
+    fireEvent.click(screen.getByRole("button", { name: "Show conversation" }));
+    expect(options.onHistoryCollapsedChange).toHaveBeenCalledWith(false);
   });
 
   it("applies the requested surface tone to the timeline and footer", () => {

@@ -50,9 +50,14 @@ export function PluginThreadChat({
   className,
   leadingContent,
   messageActions,
+  experimental_historyCollapsed,
+  experimental_onHistoryCollapsedChange,
 }: ThreadChatProps) {
   const containerClassName = cn(
-    layout === "contained" ? "flex h-full min-h-0 flex-col" : "flex flex-col",
+    layout === "contained" &&
+      !(variant !== "timeline" && experimental_historyCollapsed)
+      ? "flex h-full min-h-0 flex-col"
+      : "flex flex-col",
     className,
   );
   return (
@@ -65,6 +70,8 @@ export function PluginThreadChat({
         permissionPolicy={permissionPolicy}
         leadingContent={leadingContent}
         messageActions={messageActions}
+        historyCollapsed={experimental_historyCollapsed}
+        onHistoryCollapsedChange={experimental_onHistoryCollapsedChange}
       />
     </div>
   );
@@ -78,6 +85,8 @@ interface PluginThreadChatBodyProps {
   permissionPolicy: "inherit" | "editable";
   leadingContent: ReactNode;
   messageActions: readonly ThreadChatMessageAction[] | undefined;
+  historyCollapsed: boolean | undefined;
+  onHistoryCollapsedChange: ((collapsed: boolean) => void) | undefined;
 }
 
 function PluginThreadChatBody({
@@ -88,6 +97,8 @@ function PluginThreadChatBody({
   permissionPolicy,
   leadingContent,
   messageActions,
+  historyCollapsed,
+  onHistoryCollapsedChange,
 }: PluginThreadChatBodyProps) {
   const threadQuery = useThread(threadId, { enabled: threadId.length > 0 });
   const thread = threadQuery.data;
@@ -298,6 +309,8 @@ function PluginThreadChatBody({
         layout={layout}
         measure={variant === "full" ? "page" : "panel"}
         surfaceTone={variant === "compact" ? "sidebar" : "background"}
+        historyCollapsed={historyCollapsed}
+        onHistoryCollapsedChange={onHistoryCollapsedChange}
         threadId={threadId}
         projectId={thread.projectId}
         providerId={thread.providerId}
