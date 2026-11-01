@@ -228,7 +228,9 @@ export async function getAcpProviderInstallationStatus(args: {
   dialectId?: string;
   checkUpdates?: boolean;
 }): Promise<ProviderInstallationStatus> {
-  if (args.dialectId === "omp") return getOmpInstallationStatus(args);
+  if (args.dialectId === "omp") {
+    return getOmpInstallationStatus({ ...args, readVersion: readAcpCliVersion });
+  }
   const executableName = args.command ?? "";
   const resolvedExecutable =
     args.command === null ? null : await resolveExecutablePath(args.command);
@@ -267,7 +269,9 @@ export async function getAcpProviderInstallationRun(args: {
   dialectId?: string;
   action: "install" | "update";
 }): Promise<ProviderInstallationRunResult> {
-  if (args.dialectId === "omp") return getOmpInstallationRun(args);
+  if (args.dialectId === "omp") {
+    return getOmpInstallationRun({ ...args, readVersion: readAcpCliVersion });
+  }
   const status = await getAcpProviderInstallationStatus(args);
   return buildAcpProviderInstallationRun(status, args);
 }

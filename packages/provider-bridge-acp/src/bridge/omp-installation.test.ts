@@ -13,7 +13,7 @@ async function fixture(current: string, check: string | null) {
   const root = await mkdtemp(path.join(tmpdir(), "bb-omp-maintenance-"));
   roots.push(root);
   const command = path.join(root, "omp");
-  await writeFile(command, `#!/usr/bin/env node\nif (process.argv.includes('--version')) { console.log(${JSON.stringify(`omp/${current}`)}); } else { ${check === null ? "process.exit(1);" : `console.log(${JSON.stringify(check)});`} }\n`);
+  await writeFile(command, `#!/usr/bin/env node\nif (process.argv.includes('--version')) { console.log(${JSON.stringify(`omp ${current}`)}); } else { ${check === null ? "process.exit(1);" : `console.log(${JSON.stringify(check)});`} }\n`);
   await chmod(command, 0o755);
   return { command, dialectId: "omp", maintenance: undefined };
 }
@@ -50,5 +50,16 @@ describe.skipIf(process.platform === "win32")("omp native installation maintenan
       installed: true, currentVersion: "18.10.2", latestVersion: null, needsUpdate: false, installAction: null,
     });
     expect(await getAcpProviderInstallationStatus(target)).toMatchObject({ latestVersion: "18.11.0-canary.2", needsUpdate: true });
+  });
+
+  it("preserves calendar-version identifiers during local-only checks", async () => {
+    const target = await fixture("2026.10.09-abcdef", null);
+    expect(await getAcpProviderInstallationStatus({ ...target, checkUpdates: false })).toMatchObject({
+      installed: true,
+      currentVersion: "2026.10.09-abcdef",
+      latestVersion: null,
+      needsUpdate: false,
+      installAction: null,
+    });
   });
 });

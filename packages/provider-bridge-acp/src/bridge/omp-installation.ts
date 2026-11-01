@@ -6,7 +6,6 @@ import {
   commandOutput,
   compareVersions,
   installationVerification,
-  readCliVersion,
   resolveExecutablePath,
   versionFrom,
 } from "@bb/provider-bridge-protocol/bridge-kit";
@@ -15,12 +14,13 @@ const INSTALL_SCRIPT = "curl -fsSL https://omp.sh/install | sh -s -- --binary";
 
 export async function getOmpInstallationStatus(args: {
   command: string | null;
+  readVersion: (command: string) => Promise<string | null>;
   checkUpdates?: boolean;
 }): Promise<ProviderInstallationStatus> {
   const executableName = args.command ?? "omp";
   const executablePath = await resolveExecutablePath(executableName);
   const installed = executablePath !== null;
-  const currentVersion = installed ? await readCliVersion(executablePath) : null;
+  const currentVersion = installed ? await args.readVersion(executablePath) : null;
   let latestVersion: string | null = null;
   if (installed && args.checkUpdates !== false) {
     const output = await commandOutput(executablePath, ["update", "--check"]);
@@ -60,6 +60,7 @@ export async function getOmpInstallationStatus(args: {
 
 export async function getOmpInstallationRun(args: {
   command: string | null;
+  readVersion: (command: string) => Promise<string | null>;
   action: "install" | "update";
 }): Promise<ProviderInstallationRunResult> {
   const status = await getOmpInstallationStatus(args);
