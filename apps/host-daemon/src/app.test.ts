@@ -310,6 +310,12 @@ function createFakeRuntime(): AgentRuntime {
     hasThread() {
       return false;
     },
+    listHostedThreadIds() {
+      return [];
+    },
+    async updateThreadDynamicTools() {
+      return { status: "no_session" };
+    },
     getLiveThreadIds() {
       return [];
     },

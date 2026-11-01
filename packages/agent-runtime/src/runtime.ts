@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import {
   normalizeProviderThreadNameEvent,
@@ -16,6 +17,7 @@ import {
   providerUsageResultSchema,
   ThreadEventGrammar,
   threadIdentityResultSchema,
+  threadToolsUpdateResultSchema,
 } from "@bb/provider-bridge-protocol";
 import {
   JsonRpcResponseError,
@@ -65,6 +67,7 @@ import type {
   AgentRuntimeOptions,
   AgentRuntimeSkillRoot,
   ReapedIdleProviderSession,
+  ThreadDynamicToolsUpdateStatus,
 } from "./types.js";
 import {
   resolveContributedEnvironment,
@@ -2330,6 +2333,43 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       });
     },
 
+    async updateThreadDynamicTools({ threadId, dynamicTools }) {
+      return runThreadOperation({
+        threadId,
+        work: async (): Promise<{ status: ThreadDynamicToolsUpdateStatus }> => {
+          const currentConfig = threadRuntimeConfigs.get(threadId);
+          if (
+            currentConfig === undefined ||
+            threadIdentityRegistry.getProviderSession(threadId) === null
+          ) {
+            return { status: "no_session" };
+          }
+          if (
+            isDeepStrictEqual(currentConfig.dynamicTools ?? [], dynamicTools)
+          ) {
+            return { status: "unchanged" };
+          }
+          setThreadRuntimeConfig(threadId, { ...currentConfig, dynamicTools });
+          const proc = requireProviderProcessForThread(threadId);
+          const plan = proc.adapter.buildCommandPlan({
+            type: "thread/tools/update",
+            threadId,
+            providerThreadId: requireProviderThreadId(threadId),
+            dynamicTools,
+          });
+          if (plan.kind !== "request") {
+            return { status: "deferred" };
+          }
+          const result = await sendCommand({
+            proc,
+            message: plan,
+            resultSchema: threadToolsUpdateResultSchema,
+          });
+          return { status: result.applied ? "applied" : "deferred" };
+        },
+      });
+    },
+
     async archiveThread({
       threadId,
       providerId,
@@ -2588,6 +2628,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
 
     hasThread(threadId) {
       return threadIdentityRegistry.getProviderSession(threadId) !== null;
+    },
+
+    listHostedThreadIds() {
+      return [...threadRuntimeConfigs.keys()].filter(
+        (threadId) =>
+          threadIdentityRegistry.getProviderSession(threadId) !== null,
+      );
     },
 
     getLiveThreadIds() {

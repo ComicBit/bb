@@ -921,6 +921,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       changes.push("provider-registrations-changed");
     }
     deps.hub.notifySystem(changes);
+    deps.onPluginsChanged?.();
   }
 
   function compactPath(path: string): string {

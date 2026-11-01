@@ -213,6 +213,10 @@ function createFakeRuntime() {
       async () => ({ reapedSessions: [] }),
     ),
     hasThread: (threadId) => activeTurnsByThreadId.has(threadId),
+    listHostedThreadIds: () => [...activeTurnsByThreadId.keys()],
+    updateThreadDynamicTools: vi.fn(async () => ({
+      status: "no_session" as const,
+    })),
     getLiveThreadIds: () => [
       ...new Set([
         ...activeTurnsByThreadId.keys(),

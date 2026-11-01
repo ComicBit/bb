@@ -16,6 +16,9 @@ describe("builtin Keep Awake plugin", () => {
         hostId: host.id,
         sessionId: session.id,
         handle(request) {
+          if (request.command.type === "provider.sessions.list") {
+            return { ok: true, result: { sessions: [] } };
+          }
           if (request.command.type !== "plugin.host.call") {
             throw new Error(`unexpected command ${request.command.type}`);
           }
@@ -33,19 +36,22 @@ describe("builtin Keep Awake plugin", () => {
           };
         },
       });
+      const pluginHostCalls = () =>
+        responder.requests.filter(
+          (request) => request.command.type === "plugin.host.call",
+        );
 
       server.pluginService.bindSdk({ baseUrl: server.baseUrl });
       await installTestBuiltinPlugin(server, "keep-awake");
 
-      await vi.waitFor(() => expect(responder.requests).toHaveLength(1));
-      expect(responder.requests[0]?.command).toMatchObject({
+      await vi.waitFor(() => expect(pluginHostCalls()).toHaveLength(1));
+      expect(pluginHostCalls()[0]?.command).toMatchObject({
         type: "plugin.host.call",
         contributedEnv: [],
         pluginId: "keep-awake",
         method: "setEnabled",
         input: { enabled: false },
       });
-
       const response = await server.app.request(
         "/api/v1/plugins/keep-awake/rpc/setConfiguration",
         {
@@ -58,8 +64,8 @@ describe("builtin Keep Awake plugin", () => {
         },
       );
       expect(response.status).toBe(200);
-      await vi.waitFor(() => expect(responder.requests).toHaveLength(2));
-      expect(responder.requests[1]?.command).toMatchObject({
+      await vi.waitFor(() => expect(pluginHostCalls()).toHaveLength(2));
+      expect(pluginHostCalls()[1]?.command).toMatchObject({
         type: "plugin.host.call",
         contributedEnv: [],
         pluginId: "keep-awake",

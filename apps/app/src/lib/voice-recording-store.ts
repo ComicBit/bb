@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import {
   createStore,
   del,
+  delMany,
   getMany,
   keys,
   set,
@@ -33,12 +34,14 @@ interface VoiceRecordingEntry {
   errorMessage: string | null;
 }
 
+const audioBufferSchema = z.custom<ArrayBuffer>(
+  (value) => Object.prototype.toString.call(value) === "[object ArrayBuffer]",
+);
+
 const storedRecordingSchema = z.object({
   id: z.string().min(1),
   key: z.string().min(1),
-  audio: z.custom<ArrayBuffer>(
-    (value) => Object.prototype.toString.call(value) === "[object ArrayBuffer]",
-  ),
+  audio: audioBufferSchema,
   mimeType: z.string(),
   fileName: z.string().min(1),
   promptContext: z.string().nullable(),
@@ -48,11 +51,34 @@ const storedRecordingSchema = z.object({
 
 type StoredRecording = z.infer<typeof storedRecordingSchema>;
 
+const storedCaptureChunkSchema = z.object({
+  captureId: z.string().min(1),
+  key: z.string().min(1),
+  seq: z.number().int().nonnegative(),
+  audio: audioBufferSchema,
+  mimeType: z.string(),
+  promptContext: z.string().nullable(),
+  createdAt: z.number(),
+});
+
+type StoredCaptureChunk = z.infer<typeof storedCaptureChunkSchema>;
+
+export interface VoiceCapture {
+  append(chunk: Blob): void;
+  close(): void;
+}
+
+export const INTERRUPTED_CAPTURE_MESSAGE =
+  "Recording was interrupted before it was sent";
+
+const CLOSED_CAPTURE: VoiceCapture = { append() {}, close() {} };
+
 const EMPTY_RECORDINGS: readonly FailedVoiceRecording[] = [];
 const entries = new Map<string, VoiceRecordingEntry>();
 const snapshots = new Map<string, readonly FailedVoiceRecording[]>();
 const listeners = new Set<() => void>();
 const hydratedKeys = new Set<string>();
+const liveCaptureIds = new Set<string>();
 let database: UseStore | null | undefined;
 let databaseQueue: Promise<void> = Promise.resolve();
 
@@ -96,6 +122,86 @@ function readSnapshot(key: string): readonly FailedVoiceRecording[] {
   return snapshot;
 }
 
+function newRecordingId(createdAt: number): string {
+  return `${createdAt.toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function recordingFileName(mimeType: string): string {
+  const extension = mimeType.includes("ogg")
+    ? "ogg"
+    : mimeType.includes("mp4")
+      ? "mp4"
+      : "webm";
+  return `recording.${extension}`;
+}
+
+function storedRecordingKey(key: string, id: string): IDBValidKey {
+  return [key, id];
+}
+
+function storedCaptureChunkKey(
+  key: string,
+  captureId: string,
+  seq: number,
+): IDBValidKey {
+  return [key, captureId, seq];
+}
+
+async function recoverInterruptedCaptures(
+  store: UseStore,
+  chunkKeys: IDBValidKey[],
+): Promise<boolean> {
+  const captures = new Map<string, StoredCaptureChunk[]>();
+  for (const row of await getMany<unknown>(chunkKeys, store)) {
+    const parsed = storedCaptureChunkSchema.safeParse(row);
+    if (!parsed.success || liveCaptureIds.has(parsed.data.captureId)) continue;
+    const chunks = captures.get(parsed.data.captureId) ?? [];
+    chunks.push(parsed.data);
+    captures.set(parsed.data.captureId, chunks);
+  }
+  let recovered = false;
+  for (const [captureId, chunks] of captures) {
+    chunks.sort((left, right) => left.seq - right.seq);
+    const [first] = chunks;
+    if (!first || entries.has(captureId)) continue;
+    const stored: StoredRecording = {
+      id: captureId,
+      key: first.key,
+      audio: await new Blob(chunks.map((chunk) => chunk.audio)).arrayBuffer(),
+      mimeType: first.mimeType,
+      fileName: recordingFileName(first.mimeType),
+      promptContext: first.promptContext,
+      delivery: "insert",
+      createdAt: first.createdAt,
+    };
+    await set(storedRecordingKey(stored.key, stored.id), stored, store);
+    await delMany(
+      chunks.map((chunk) =>
+        storedCaptureChunkKey(chunk.key, captureId, chunk.seq),
+      ),
+      store,
+    );
+    entries.set(captureId, {
+      recording: {
+        id: captureId,
+        key: stored.key,
+        file: new File([stored.audio], stored.fileName, {
+          type: stored.mimeType,
+        }),
+        promptContext: stored.promptContext ?? undefined,
+        delivery: stored.delivery,
+        createdAt: stored.createdAt,
+      },
+      persisted: true,
+      retryController: null,
+      status: "failed",
+      errorMessage: INTERRUPTED_CAPTURE_MESSAGE,
+    });
+    recovered = true;
+  }
+  return recovered;
+}
+
 function hydrate(key: string): void {
   if (hydratedKeys.has(key)) return;
   hydratedKeys.add(key);
@@ -103,8 +209,14 @@ function hydrate(key: string): void {
     const storedKeys = (await keys<IDBValidKey>(store)).filter(
       (storedKey) => Array.isArray(storedKey) && storedKey[0] === key,
     );
+    const recordingKeys = storedKeys.filter(
+      (storedKey) => Array.isArray(storedKey) && storedKey.length === 2,
+    );
+    const chunkKeys = storedKeys.filter(
+      (storedKey) => Array.isArray(storedKey) && storedKey.length === 3,
+    );
     let restored = false;
-    for (const row of await getMany<unknown>(storedKeys, store)) {
+    for (const row of await getMany<unknown>(recordingKeys, store)) {
       const parsed = storedRecordingSchema.safeParse(row);
       if (!parsed.success || entries.has(parsed.data.id)) continue;
       const { audio, mimeType, fileName, promptContext, ...recording } =
@@ -122,6 +234,7 @@ function hydrate(key: string): void {
       });
       restored = true;
     }
+    if (await recoverInterruptedCaptures(store, chunkKeys)) restored = true;
     if (restored) notify(key);
   });
 }
@@ -140,6 +253,57 @@ export function useFailedVoiceRecordings(
   );
 }
 
+export function beginVoiceCapture(
+  capture: {
+    key: string;
+    mimeType: string;
+    promptContext: string | undefined;
+  },
+  options: { persist: boolean },
+): VoiceCapture {
+  if (!options.persist) return CLOSED_CAPTURE;
+  const createdAt = Date.now();
+  const captureId = newRecordingId(createdAt);
+  liveCaptureIds.add(captureId);
+  let nextSeq = 0;
+  return {
+    append(chunk) {
+      if (!liveCaptureIds.has(captureId)) return;
+      const seq = nextSeq;
+      nextSeq += 1;
+      void enqueueDatabaseTask(async (store) => {
+        if (!liveCaptureIds.has(captureId)) return;
+        const stored: StoredCaptureChunk = {
+          captureId,
+          key: capture.key,
+          seq,
+          audio: await chunk.arrayBuffer(),
+          mimeType: chunk.type || capture.mimeType,
+          promptContext: capture.promptContext ?? null,
+          createdAt,
+        };
+        await set(
+          storedCaptureChunkKey(capture.key, captureId, seq),
+          stored,
+          store,
+        );
+      });
+    },
+    close() {
+      if (!liveCaptureIds.delete(captureId)) return;
+      const written = nextSeq;
+      void enqueueDatabaseTask((store) =>
+        delMany(
+          Array.from({ length: written }, (_, seq) =>
+            storedCaptureChunkKey(capture.key, captureId, seq),
+          ),
+          store,
+        ),
+      );
+    },
+  };
+}
+
 export function saveVoiceRecording(
   recording: Omit<VoiceRecording, "id" | "createdAt">,
   options: { persist: boolean },
@@ -147,7 +311,7 @@ export function saveVoiceRecording(
   const createdAt = Date.now();
   const saved: VoiceRecording = {
     ...recording,
-    id: `${createdAt.toString(36)}-${Math.random().toString(36).slice(2)}`,
+    id: newRecordingId(createdAt),
     createdAt,
   };
   entries.set(saved.id, {
@@ -171,7 +335,7 @@ export function saveVoiceRecording(
         delivery: saved.delivery,
         createdAt: saved.createdAt,
       };
-      await set([saved.key, saved.id], stored, store);
+      await set(storedRecordingKey(saved.key, saved.id), stored, store);
     });
   }
   return saved;
@@ -216,7 +380,9 @@ export function deleteVoiceRecording(id: string): Promise<void> {
   entry.retryController?.abort();
   notify(entry.recording.key);
   if (!entry.persisted) return Promise.resolve();
-  return enqueueDatabaseTask((store) => del([entry.recording.key, id], store));
+  return enqueueDatabaseTask((store) =>
+    del(storedRecordingKey(entry.recording.key, id), store),
+  );
 }
 
 export function deleteVoiceRecordingsForKey(key: string): void {

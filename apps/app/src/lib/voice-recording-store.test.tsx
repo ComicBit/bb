@@ -94,3 +94,80 @@ it("leaves nothing stored once recordings are deleted, even before their saves f
   expect(result.current).toEqual([]);
   expect(await keys(recordingsDatabase)).toEqual([]);
 });
+
+it("recovers the audio captured before a reload interrupted the recording", async () => {
+  const before = await loadFreshStore();
+  const capture = before.beginVoiceCapture(
+    {
+      key: "thread/thr_1",
+      mimeType: "audio/mp4",
+      promptContext: "draft so far",
+    },
+    { persist: true },
+  );
+  for (const part of ["first ", "second ", "third"]) {
+    capture.append(new Blob([part], { type: "audio/mp4" }));
+  }
+  await waitFor(async () =>
+    expect(await keys(recordingsDatabase)).toHaveLength(3),
+  );
+
+  const after = await loadFreshStore();
+  const { result } = renderHook(() =>
+    after.useFailedVoiceRecordings("thread/thr_1"),
+  );
+  await waitFor(() => expect(result.current).toHaveLength(1));
+  const [recovered] = result.current;
+  expect(recovered).toMatchObject({
+    key: "thread/thr_1",
+    promptContext: "draft so far",
+    delivery: "insert",
+    errorMessage: after.INTERRUPTED_CAPTURE_MESSAGE,
+  });
+  expect(recovered?.file.name).toBe("recording.mp4");
+  expect(recovered?.file.type).toBe("audio/mp4");
+  expect(await recovered?.file.text()).toBe("first second third");
+  await waitFor(async () =>
+    expect(await keys(recordingsDatabase)).toEqual([
+      ["thread/thr_1", recovered?.id],
+    ]),
+  );
+
+  const again = await loadFreshStore();
+  const { result: reloaded } = renderHook(() =>
+    again.useFailedVoiceRecordings("thread/thr_1"),
+  );
+  await waitFor(() => expect(reloaded.current).toHaveLength(1));
+  expect(await reloaded.current[0]?.file.text()).toBe("first second third");
+});
+
+it("stores a finished capture once, as its recording", async () => {
+  const before = await loadFreshStore();
+  const capture = before.beginVoiceCapture(
+    { key: "thread/thr_1", mimeType: "audio/webm", promptContext: undefined },
+    { persist: true },
+  );
+  capture.append(new Blob(["spoken audio"], { type: "audio/webm" }));
+  const saved = before.saveVoiceRecording(
+    {
+      key: "thread/thr_1",
+      file: recordingFile("spoken audio"),
+      promptContext: undefined,
+      delivery: "send",
+    },
+    { persist: true },
+  );
+  capture.close();
+  await waitFor(async () =>
+    expect(await keys(recordingsDatabase)).toEqual([
+      ["thread/thr_1", saved.id],
+    ]),
+  );
+
+  const after = await loadFreshStore();
+  const { result } = renderHook(() =>
+    after.useFailedVoiceRecordings("thread/thr_1"),
+  );
+  await waitFor(() => expect(result.current).toHaveLength(1));
+  expect(result.current[0]).toMatchObject({ id: saved.id, delivery: "send" });
+});

@@ -12,7 +12,7 @@ export {
   updateProject,
   deleteProject,
 } from "./projects.js";
-export type { ReorderProjectResult } from "./projects.js";
+export type { ProjectRow, ReorderProjectResult } from "./projects.js";
 
 export {
   getThreadConversationOutlineRecord,

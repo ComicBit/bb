@@ -103,6 +103,7 @@ interface FakeRuntimeState {
   runningProviders: string[];
   shutdownCount: number;
   startedDynamicTools: DynamicTool[] | undefined;
+  updatedDynamicTools: { threadId: string; dynamicTools: DynamicTool[] }[];
   startedBridgeLaunch: AgentRuntimeBridgeLaunch | undefined;
   startedEnvironmentId: string | undefined;
   startedInput: PromptInput[] | undefined;
@@ -178,6 +179,7 @@ export function createFakeRuntime() {
     runningProviders: [],
     shutdownCount: 0,
     startedDynamicTools: undefined,
+    updatedDynamicTools: [],
     startedBridgeLaunch: undefined,
     startedEnvironmentId: undefined,
     startedInput: undefined,
@@ -312,6 +314,16 @@ export function createFakeRuntime() {
     },
     hasThread(threadId) {
       return providerSessionsByThreadId.has(threadId);
+    },
+    listHostedThreadIds() {
+      return [...providerSessionsByThreadId.keys()];
+    },
+    async updateThreadDynamicTools(args) {
+      if (!providerSessionsByThreadId.has(args.threadId)) {
+        return { status: "no_session" };
+      }
+      state.updatedDynamicTools.push(args);
+      return { status: "applied" };
     },
     getLiveThreadIds() {
       return [...activeTurnsByThreadId.keys()];

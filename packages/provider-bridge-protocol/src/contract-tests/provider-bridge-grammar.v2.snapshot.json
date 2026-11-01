@@ -302,6 +302,7 @@
     "threadArchive": "default",
     "threadRename": "default",
     "threadGoalClear": "default",
+    "threadToolsUpdate": "optional",
     "fork": "default",
     "approvalEnforcedBy": "default",
     "grammarVersions": "default",
@@ -332,6 +333,7 @@
     "thread/resume",
     "thread/start",
     "thread/stop",
+    "thread/tools/update",
     "thread/unarchive",
     "turn/start",
     "turn/steer"

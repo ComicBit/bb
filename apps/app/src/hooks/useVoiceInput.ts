@@ -5,9 +5,11 @@ import { useAudioInputDevices } from "./useAudioInputDevices";
 import { appToast } from "@/components/ui/app-toast";
 import { saveFile } from "@/lib/save-file";
 import {
+  beginVoiceCapture,
   deleteVoiceRecording,
   deleteVoiceRecordingsForKey,
   failVoiceRecording,
+  recordingFileName,
   saveVoiceRecording,
   startVoiceRecordingRetry,
   finishVoiceRecordingRetry,
@@ -128,17 +130,6 @@ function resolvePreferredAudioMimeType(): string | null {
   return null;
 }
 
-function createRecordingFile(audioBlob: Blob, mimeType: string): File {
-  const extension = mimeType.includes("ogg")
-    ? "ogg"
-    : mimeType.includes("mp4")
-      ? "mp4"
-      : "webm";
-  return new File([audioBlob], `recording.${extension}`, {
-    type: mimeType,
-  });
-}
-
 export function useVoiceInput(options: UseVoiceInputOptions) {
   const preferredAudioInputDeviceId = useAudioInputDevicePreferenceValue();
   const {
@@ -158,7 +149,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   const chunksRef = useRef<Blob[]>([]);
   const startedAtMsRef = useRef<number | null>(null);
   const promptContextRef = useRef<string | undefined>(undefined);
-  const shouldTranscribeRef = useRef(true);
+  const stopIntentRef = useRef<"transcribe" | "discard">("transcribe");
   const deliveryRef = useRef<VoiceDelivery>("insert");
   const mountedRef = useRef(true);
   const acceptedRecordingPendingRef = useRef(false);
@@ -366,13 +357,14 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   useEffect(() => {
     return () => {
       const recorder = mediaRecorderRef.current;
-      if (recorder && recorder.state === "recording") {
+      const recorderActive = recorder?.state === "recording";
+      if (recorder && recorderActive) {
         if (acceptOnUnmountRef.current) {
           deliveryRef.current = "insert";
-          shouldTranscribeRef.current = true;
+          stopIntentRef.current = "transcribe";
           acceptedRecordingPendingRef.current = true;
         } else {
-          shouldTranscribeRef.current = false;
+          stopIntentRef.current = "discard";
         }
         try {
           recorder.stop();
@@ -382,7 +374,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       }
       const acceptedRecordingPending = acceptedRecordingPendingRef.current;
       mediaRecorderRef.current = null;
-      if (!acceptedRecordingPending) {
+      if (!acceptedRecordingPending && !recorderActive) {
         chunksRef.current = [];
         startedAtMsRef.current = null;
         promptContextRef.current = undefined;
@@ -443,17 +435,8 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   );
 
   const settleTranscription = useCallback(
-    async (
-      recording: VoiceRecording,
-      result: TranscriptionResult,
-      onCancel: "discard" | "keep",
-    ) => {
-      if (result.kind === "cancelled") {
-        if (onCancel === "discard") {
-          void deleteVoiceRecording(recording.id);
-        }
-        return;
-      }
+    async (recording: VoiceRecording, result: TranscriptionResult) => {
+      if (result.kind === "cancelled") return;
       if (result.kind === "failed") {
         if (mountedRef.current) {
           failVoiceRecording(recording.id, result.message);
@@ -493,7 +476,12 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       if (transcriptionAbortRef.current === abortController) {
         transcriptionAbortRef.current = null;
       }
-      await settleTranscription(recording, result, "discard");
+      await settleTranscription(
+        recording,
+        result.kind === "cancelled"
+          ? { kind: "failed", message: "Transcription cancelled" }
+          : result,
+      );
       setState("idle");
     },
     [options, runTranscription, settleTranscription],
@@ -539,7 +527,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       chunksRef.current = [];
       startedAtMsRef.current = Date.now();
       promptContextRef.current = options.getPromptContext?.();
-      shouldTranscribeRef.current = true;
+      stopIntentRef.current = "transcribe";
       acceptedRecordingPendingRef.current = false;
       acceptOnUnmountRef.current = persistRecordings;
       shouldHoldWakeLockRef.current = true;
@@ -558,6 +546,14 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         ? new MediaRecorder(recorderInput, { mimeType: preferredMimeType })
         : new MediaRecorder(recorderInput);
       mediaRecorderRef.current = recorder;
+      const capture = beginVoiceCapture(
+        {
+          key: recordingKey,
+          mimeType: recorder.mimeType || preferredMimeType || "audio/webm",
+          promptContext: promptContextRef.current,
+        },
+        { persist: persistRecordings },
+      );
 
       recorder.onstart = () => {
         setState("recording");
@@ -566,6 +562,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       recorder.ondataavailable = (event: BlobEvent) => {
         if (event.data.size > 0) {
           chunksRef.current.push(event.data);
+          capture.append(event.data);
         }
       };
 
@@ -577,9 +574,11 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         acceptedRecordingPendingRef.current = false;
         releaseRecordingWakeLock();
         stopMediaStream();
+        const stopIntent = stopIntentRef.current;
+        stopIntentRef.current = "transcribe";
 
-        if (!shouldTranscribeRef.current) {
-          shouldTranscribeRef.current = true;
+        if (stopIntent === "discard") {
+          capture.close();
           chunksRef.current = [];
           promptContextRef.current = undefined;
           setState("idle");
@@ -591,6 +590,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         const durationMs = Date.now() - startedAtMs;
 
         if (durationMs < MIN_RECORDING_DURATION_MS) {
+          capture.close();
           showError("Recording too short (minimum 1 second)");
           chunksRef.current = [];
           promptContextRef.current = undefined;
@@ -600,6 +600,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         const chunks = chunksRef.current;
         chunksRef.current = [];
         if (chunks.length === 0) {
+          capture.close();
           showError("No audio was captured");
           promptContextRef.current = undefined;
           return;
@@ -607,8 +608,13 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
 
         const recordedMimeType =
           recorder.mimeType || preferredMimeType || "audio/webm";
-        const audioBlob = new Blob(chunks, { type: recordedMimeType });
-        const audioFile = createRecordingFile(audioBlob, recordedMimeType);
+        const audioFile = new File(
+          chunks,
+          recordingFileName(recordedMimeType),
+          {
+            type: recordedMimeType,
+          },
+        );
         const promptContext = promptContextRef.current;
         promptContextRef.current = undefined;
 
@@ -621,17 +627,23 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
           },
           { persist: persistRecordings },
         );
+        capture.close();
         await transcribeRecording(recording);
       };
 
-      recorder.start(CHUNK_TIMESLICE_MS);
+      try {
+        recorder.start(CHUNK_TIMESLICE_MS);
+      } catch (error) {
+        capture.close();
+        throw error;
+      }
     } catch (error) {
       stopMediaStream();
       mediaRecorderRef.current = null;
       chunksRef.current = [];
       startedAtMsRef.current = null;
       promptContextRef.current = undefined;
-      shouldTranscribeRef.current = true;
+      stopIntentRef.current = "transcribe";
       acceptedRecordingPendingRef.current = false;
       transcriptionAbortRef.current = null;
       releaseRecordingWakeLock();
@@ -672,7 +684,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       }
       deliveryRef.current = nextDelivery;
       setDelivery(nextDelivery);
-      shouldTranscribeRef.current = true;
+      stopIntentRef.current = "transcribe";
       acceptedRecordingPendingRef.current = true;
       try {
         recorder.stop();
@@ -690,7 +702,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       if (!signal) return;
       void runTranscription(recording, signal, undefined).then((result) => {
         if (!finishVoiceRecordingRetry(recording.id, signal)) return;
-        return settleTranscription(recording, result, "keep");
+        return settleTranscription(recording, result);
       });
     },
     [runTranscription, settleTranscription],
@@ -708,7 +720,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     if (state === "recording") {
       const recorder = mediaRecorderRef.current;
       if (recorder && recorder.state === "recording") {
-        shouldTranscribeRef.current = false;
+        stopIntentRef.current = "discard";
         acceptedRecordingPendingRef.current = false;
         try {
           recorder.stop();
@@ -716,7 +728,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
           showError(resolveRecordingErrorMessage(error));
         }
       } else {
-        shouldTranscribeRef.current = false;
+        stopIntentRef.current = "discard";
         acceptedRecordingPendingRef.current = false;
         transcriptionAbortRef.current?.abort();
       }

@@ -5,8 +5,9 @@ import {
   providerToolCallCancellationSchema,
   PROVIDER_TOOL_CALL_CANCELLED_METHOD,
 } from "@bb/provider-bridge-protocol/bridge-kit";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 
 export const ACP_BRIDGE_MCP_SERVER_NAME = "bb-bridge";
@@ -51,7 +52,23 @@ export const dynamicToolBridgeRequestSchema = z.discriminatedUnion("kind", [
     token: z.string().min(1),
     tool: z.string().min(1),
   }),
+  z.object({
+    kind: z.literal("subscribe"),
+    threadId: z.string().min(1),
+    token: z.string().min(1),
+  }),
 ]);
+
+const dynamicToolSnapshotSchema = z.object({
+  kind: z.literal("tools"),
+  tools: z.array(dynamicToolSchema),
+});
+
+export function encodeDynamicToolSnapshot(
+  tools: readonly DynamicTool[],
+): string {
+  return `${JSON.stringify({ kind: "tools", tools })}\n`;
+}
 
 type BridgeRequest = z.input<typeof dynamicToolBridgeRequestSchema>;
 
@@ -100,6 +117,11 @@ interface McpServerEnvironment {
   threadId: string;
   token: string;
   tools: DynamicTool[];
+}
+
+interface McpServerState extends McpServerEnvironment {
+  subscription: Socket | null;
+  toolsListed: boolean;
 }
 
 let nextMcpToolCallId = 0;
@@ -244,8 +266,75 @@ function startProgressHeartbeat(args: {
   return () => clearInterval(timer);
 }
 
+function mcpVisibleTools(tools: readonly DynamicTool[]) {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  }));
+}
+
+function applyToolSnapshot(state: McpServerState, tools: DynamicTool[]): void {
+  const changed = !isDeepStrictEqual(
+    mcpVisibleTools(state.tools),
+    mcpVisibleTools(tools),
+  );
+  state.tools = tools;
+  if (changed && state.toolsListed) {
+    writeJson({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  }
+}
+
+function parseToolSnapshot(line: string): DynamicTool[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const snapshot = dynamicToolSnapshotSchema.safeParse(parsed);
+  return snapshot.success ? snapshot.data.tools : null;
+}
+
+function subscribeToToolSnapshots(state: McpServerState): Socket {
+  const socket = createConnection({ host: state.host, port: state.port });
+  let buffer = "";
+  socket.setEncoding("utf8");
+  socket.on("connect", () => {
+    const request: BridgeRequest = {
+      kind: "subscribe",
+      threadId: state.threadId,
+      token: state.token,
+    };
+    socket.write(`${JSON.stringify(request)}\n`);
+  });
+  socket.on("data", (chunk) => {
+    buffer += chunk;
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      const tools = parseToolSnapshot(line);
+      if (tools === null) {
+        process.stderr.write(
+          `bb-bridge MCP: ignored an invalid tool update: ${line}\n`,
+        );
+      } else {
+        applyToolSnapshot(state, tools);
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  });
+  socket.on("error", (error) => {
+    process.stderr.write(
+      `bb-bridge MCP: tool update subscription failed: ${error.message}\n`,
+    );
+  });
+  return socket;
+}
+
 async function handleRequest(
-  env: McpServerEnvironment,
+  env: McpServerState,
   message: JsonRpcMessage,
   pending: Map<string | number, AbortController>,
 ): Promise<void> {
@@ -267,7 +356,7 @@ async function handleRequest(
           typeof objectParams(message.params).protocolVersion === "string"
             ? objectParams(message.params).protocolVersion
             : "2024-11-05",
-        capabilities: { tools: {} },
+        capabilities: { tools: { listChanged: true } },
         serverInfo: { name: ACP_BRIDGE_MCP_SERVER_NAME, version: "1.0.0" },
       });
       void callBridge(env, {
@@ -280,16 +369,12 @@ async function handleRequest(
           }\n`,
         );
       });
+      env.subscription ??= subscribeToToolSnapshots(env);
       return;
 
     case "tools/list":
-      writeResult(message.id, {
-        tools: env.tools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-        })),
-      });
+      env.toolsListed = true;
+      writeResult(message.id, { tools: mcpVisibleTools(env.tools) });
       return;
 
     case "tools/call": {
@@ -373,11 +458,16 @@ async function handleRequest(
 }
 
 export function runAcpDynamicToolMcpServer(): void {
-  const env = readEnvironment();
+  const state: McpServerState = {
+    ...readEnvironment(),
+    subscription: null,
+    toolsListed: false,
+  };
   const pending = new Map<string | number, AbortController>();
   const rl = createInterface({ input: process.stdin, terminal: false });
   rl.on("close", () => {
     for (const controller of pending.values()) controller.abort();
+    state.subscription?.destroy();
   });
   rl.on("line", (line) => {
     const trimmed = line.trim();
@@ -390,6 +480,6 @@ export function runAcpDynamicToolMcpServer(): void {
     } catch {
       return;
     }
-    void handleRequest(env, message, pending);
+    void handleRequest(state, message, pending);
   });
 }

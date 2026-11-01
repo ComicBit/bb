@@ -10,8 +10,9 @@ its entire surface is agent-facing. It demonstrates:
 - **`bb.agents.registerTool`** — `docs_search`, the same search as a native
   dynamic tool. Parameters are a zod schema: validated per call (a model's
   bad arguments become a tool error, not a plugin error) and converted to the
-  JSON schema providers see. The tool rides the session's `dynamicTools`, so
-  it appears on the next thread/turn start.
+  JSON schema providers see. The tool rides the session's `dynamicTools`: it
+  appears on the next thread/turn start, and a plugin reload pushes a changed
+  list or schema to running ACP sessions without restarting them.
 - **`bb.agents.configure`** — selects `docs_search` and the
   `repo-conventions` skill for standard projects at session resolution time,
   and adds short project/host-specific instructions. Personal-project

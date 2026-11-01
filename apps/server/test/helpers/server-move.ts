@@ -114,6 +114,18 @@ export function registerFakeDaemon(
       if (message.type !== "host-rpc.request") {
         return;
       }
+      if (message.command.type === "provider.sessions.list") {
+        void Promise.resolve().then(() => {
+          harness.hub.recordHostOnlineRpcResponse({
+            message: toResponse(message, {
+              ok: true,
+              result: { sessions: [] },
+            }),
+            sessionId: daemon.sessionId,
+          });
+        });
+        return;
+      }
       daemon.requests.push(message);
       args.events.push(`${args.hostId}:${message.command.type}`);
       void Promise.resolve()
