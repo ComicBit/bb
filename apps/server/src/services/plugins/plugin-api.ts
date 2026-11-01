@@ -486,12 +486,14 @@ export function createPluginApi(options: {
   db: DbConnection;
   dataDir: string;
   getSdk: () => BbSdk | undefined;
+  isCurrentGeneration: () => boolean;
   recovery?: ExperimentalRecovery;
   completeAi: PluginAiServices["complete"];
   runOwnedOperation: <T>(
     label: string,
     run: (signal: AbortSignal) => Promise<T>,
     callerSignal?: AbortSignal,
+    settlement?: "releasable" | "cleanup",
   ) => Promise<T>;
   getMachineEnrollments: () => MachineEnrollments;
   getAppUrl: () => string | null;
@@ -1429,6 +1431,12 @@ export function createPluginApi(options: {
     },
   };
 
+  const canAdmitRecovery = () =>
+    !invalidated &&
+    activated &&
+    options.isCurrentGeneration() &&
+    getInstalledPlugin(db, pluginId)?.enabled === true;
+
   const api: BbPluginApi = {
     internal_DO_NOT_USE_recordPluginUse() {
       assertLive();
@@ -1460,9 +1468,7 @@ export function createPluginApi(options: {
         return options.recovery.continue({
           snapshot: args.snapshot,
           admit: () => {
-            if (invalidated || !activated || getInstalledPlugin(db, pluginId)?.enabled !== true) return false;
-            assertLive();
-            return args.admit() === true && !invalidated && getInstalledPlugin(db, pluginId)?.enabled === true;
+            return canAdmitRecovery() && args.admit() === true && canAdmitRecovery();
           },
         });
       },
@@ -1479,6 +1485,7 @@ export function createPluginApi(options: {
             return receipt;
           },
           args?.signal,
+          "cleanup",
         );
       },
     },

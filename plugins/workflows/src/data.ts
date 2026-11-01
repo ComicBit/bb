@@ -63,6 +63,7 @@ export interface WorkflowCallRow {
   /** Branch of a worktree this call provisioned, or null. */
   branchName: string | null;
   provisionedEnvironment: boolean;
+  changedFiles: number | null;
   resultJson: string | null;
   error: string | null;
   replayedFromCallId: string | null;
@@ -138,6 +139,7 @@ const CALL_SELECT = `
     provider_retry_attempts AS providerRetryAttempts,
     environment_id AS environmentId, branch_name AS branchName,
     provisioned_environment AS provisionedEnvironment,
+    changed_files AS changedFiles,
     result_json AS resultJson, error,
     replayed_from_call_id AS replayedFromCallId, replay_source AS replaySource,
     created_at AS createdAt, last_activity_at AS lastActivityAt,
@@ -307,6 +309,7 @@ export const migrations = [
    ALTER TABLE workflow_runs ADD COLUMN launch_base_commit TEXT;
    CREATE UNIQUE INDEX workflow_calls_active_child_idx ON workflow_calls(child_thread_id)
      WHERE child_thread_id IS NOT NULL AND status IN ('queued', 'running');`,
+  `ALTER TABLE workflow_calls ADD COLUMN changed_files INTEGER;`,
 ];
 
 export function createRun(
@@ -681,6 +684,7 @@ export function startCall(
        status = excluded.status,
        child_thread_id = NULL, repair_attempts = 0,
        environment_id = NULL, branch_name = NULL,
+       provisioned_environment = 0, changed_files = NULL,
        result_json = excluded.result_json, error = NULL,
        replayed_from_call_id = excluded.replayed_from_call_id,
        replay_source = excluded.replay_source,
@@ -763,16 +767,21 @@ export function attachCallThread(
 export function recordCallPlacement(
   db: Db,
   callId: string,
-  placement: { environmentId: string | null; branchName: string | null; provisionedEnvironment?: boolean },
+  placement: { environmentId: string | null; branchName: string | null; provisionedEnvironment?: boolean; threadId?: string | null; changedFiles?: number | null },
 ): void {
   db.prepare(
     `UPDATE workflow_calls SET environment_id = ?, branch_name = ?,
-       provisioned_environment = CASE WHEN ? IS NULL THEN provisioned_environment ELSE ? END
+       provisioned_environment = CASE WHEN ? IS NULL THEN provisioned_environment ELSE ? END,
+       child_thread_id = COALESCE(?, child_thread_id),
+       changed_files = CASE WHEN ? THEN ? ELSE changed_files END
      WHERE id = ?`,
   ).run(
     placement.environmentId, placement.branchName,
     placement.provisionedEnvironment === undefined ? null : Number(placement.provisionedEnvironment),
     placement.provisionedEnvironment === true ? 1 : 0,
+    placement.threadId ?? null,
+    placement.changedFiles !== undefined ? 1 : 0,
+    placement.changedFiles ?? null,
     callId,
   );
 }
@@ -802,6 +811,19 @@ export function listRunProvisionedEnvironments(
     environmentId: string;
     branchName: string | null;
   }>;
+}
+
+export function hasActiveEnvironmentConsumer(db: Db, environmentId: string, ownerRunId: string): boolean {
+  return db.prepare(
+    `SELECT 1 FROM workflow_runs runs
+     WHERE runs.id <> ? AND runs.status IN ('queued', 'running')
+       AND (runs.environment_id = ? OR EXISTS (
+         SELECT 1 FROM workflow_calls calls WHERE calls.run_id = runs.id
+           AND (calls.environment_id = ? OR
+             json_extract(calls.options_json, '$.environment.environmentId') = ?)
+       ))
+     LIMIT 1`,
+  ).get(ownerRunId, environmentId, environmentId, environmentId) !== undefined;
 }
 
 export function queueCallProviderRetry(

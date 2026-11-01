@@ -213,13 +213,11 @@ describe("plugin thread lifecycle events", () => {
       expect(deliver).toBeDefined();
       await harness.pluginService.reload("observer");
       const replacement = harness.pluginService.getApi("observer")!;
-      expect(replacement).not.toBe(first);
+      expect(replacement === first).toBe(false);
       const newHandler = vi.fn();
       replacement.events.on("thread.active", newHandler);
       deliver!();
-      const delivered = Promise.withResolvers<void>();
-      setImmediate(delivered.resolve);
-      await delivered.promise;
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
       expect(oldHandler).not.toHaveBeenCalled();
       expect(newHandler).not.toHaveBeenCalled();
       harness.pluginService.events.emitThreadActive(thread);

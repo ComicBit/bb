@@ -16,6 +16,7 @@ import { continueRecovery, readRecoverySnapshot } from "../../../src/services/th
 import { acceptThreadSendRequest } from "../../../src/services/threads/thread-send-request.js";
 import { sendQueuedMessageNow } from "../../../src/services/threads/queued-messages.js";
 import { availableModelFixture } from "../../helpers/available-models.js";
+import { EMPTY_WORKSPACE_AGENT_CONTEXT } from "../../helpers/host-rpc.js";
 import { seedQueuedMessage, seedThread, seedThreadFixture, seedThreadRuntimeState } from "../../helpers/seed.js";
 import { createTestAppHarness, type TestAppHarness } from "../../helpers/test-app.js";
 
@@ -82,6 +83,8 @@ function installTransport(harness: TestAppHarness, hostId: string, sessionId: st
         result = { models: [availableModelFixture({ model: "gpt-5", reasoningLevels: ["low", "medium", "high"], defaultReasoningLevel: "medium", isDefault: true })], selectedOnlyModels: [] };
       } else if (command.type === "host.list_files") {
         result = { files: [], truncated: false };
+      } else if (command.type === "host.read_workspace_agent_context") {
+        result = EMPTY_WORKSPACE_AGENT_CONTEXT;
       } else if (command.type === "host.list_branch_options") {
         result = { branches: ["main"], branchesTruncated: false, remoteBranches: ["origin/main"], remoteBranchesTruncated: false, selectedBranch: command.selectedBranch ? { name: command.selectedBranch, kind: command.selectedBranch.startsWith("origin/") ? "remote" : "local" } : null };
       } else if (command.type === "host.inspect_git_source") {
@@ -525,7 +528,7 @@ describe("isolated native recovery safeguard witness", () => {
       const queue = await admissionRace((fixture) => { seedQueuedMessage(fixture.harness.deps, { threadId: fixture.thread.id, content: [{ type: "text", text: "Queued user work", mentions: [] }] }); }, 1);
       const aba = await admissionRace((fixture) => { const queued = seedQueuedMessage(fixture.harness.deps, { threadId: fixture.thread.id, content: [{ type: "text", text: "User queued then cancelled", mentions: [] }] }); deleteQueuedThreadMessage(fixture.harness.db, fixture.harness.hub, queued.id); });
       const interaction = await admissionRace((fixture) => { createPendingInteraction(fixture.harness.db, { threadId: fixture.thread.id, originKind: "plugin", pluginId: "safeguard-fixture", rendererId: "decision", turnId: null, payload: "{}" }); });
-      const background = await admissionRace((fixture) => { appendThreadEvent(fixture.harness.deps, { threadId: fixture.thread.id, type: "item/backgroundTask/progress", scope: threadScope(), data: { providerThreadId: `provider-${fixture.thread.id}`, item: { id: "native-running-task", type: "backgroundTask", taskType: "local_workflow", description: "Controlled running task", status: "pending", taskStatus: "running", skipTranscript: false } } }); });
+      const background = await admissionRace((fixture) => { appendThreadEvent(fixture.harness.deps, { threadId: fixture.thread.id, type: "item/backgroundTask/progress", scope: threadScope(), data: { providerThreadId: `provider-${fixture.thread.id}`, item: { id: "native-running-task", type: "backgroundTask", taskType: "local_workflow", description: "Controlled running task", status: "pending", taskStatus: "running", foreground: false, skipTranscript: false } } }); });
       return `Queue, notified queue ABA, pending interaction, and active background task each refused prepared admission; existing queue count preserved and no continuation nudge: ${queue}; ${aba}; ${interaction}; ${background}`;
     });
 

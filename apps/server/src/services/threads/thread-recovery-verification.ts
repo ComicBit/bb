@@ -1,10 +1,11 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { threadStatusSchema, threadTurnInitiatorSchema } from "@bb/domain";
+import { jsonObjectSchema, threadStatusSchema, threadTurnInitiatorSchema } from "@bb/domain";
 import type { ExperimentalRecoverySafeguardsReceipt } from "@get-bb/plugin-sdk";
 
 const checkIds = [
@@ -28,7 +29,7 @@ const snapshotSchema = z.object({
   parentThreadId: evidenceSchema.nullable(),
   archivedAt: sequenceSchema.nullable(),
   deletedAt: sequenceSchema.nullable(),
-  pluginMetadata: z.record(z.string(), z.json()),
+  pluginMetadata: jsonObjectSchema,
   run: z.object({
     requestId: evidenceSchema,
     requestSequence: sequenceSchema,
@@ -94,7 +95,8 @@ export async function verifyRecoverySafeguards(
       if (process.env[key] !== undefined) env[key] = process.env[key];
     }
     for (const key of ["TMPDIR", "TMP", "TEMP"]) env[key] = root;
-    const child = spawn(process.execPath, [driver], { cwd: server, env, detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    // Node's typed three-descriptor overload does not cover the extra IPC channel.
+    const child = spawn(process.execPath, [driver], { cwd: server, env, detached: true, stdio: ["ignore", "pipe", "pipe", "ipc"] }) as ChildProcessByStdio<null, Readable, Readable>;
     let stdout = "";
     let stderr = "";
     let failure: Error | undefined;
@@ -113,7 +115,8 @@ export async function verifyRecoverySafeguards(
         }
       }
     };
-    const { promise: exitPromise, resolve: resolveExit } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
+    let resolveExit!: (exit: { code: number | null; signal: NodeJS.Signals | null }) => void;
+    const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => { resolveExit = resolve; });
     const finish = (exit: { code: number | null; signal: NodeJS.Signals | null }) => {
       if (finished) return;
       finished = true;
@@ -186,7 +189,8 @@ export async function verifyRecoverySafeguards(
       signal?.removeEventListener("abort", abort);
     }
   } finally {
-    const { promise: cleanupExpired, reject: rejectCleanup } = Promise.withResolvers<never>();
+    let rejectCleanup!: (reason: Error) => void;
+    const cleanupExpired = new Promise<never>((_resolve, reject) => { rejectCleanup = reject; });
     const cleanupDeadline = setTimeout(() => rejectCleanup(new Error("Native recovery safeguard temporary artifact cleanup exceeded its 3000ms deadline")), 3000);
     try { await Promise.race([rm(root, { recursive: true, force: true }), cleanupExpired]); }
     finally { clearTimeout(cleanupDeadline); }

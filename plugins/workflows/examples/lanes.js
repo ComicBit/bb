@@ -82,8 +82,9 @@
  * covers its worst case; otherwise it waits for an in-flight lane to tighten
  * or release its reserve, and every deferral is logged with the numbers. When
  * no lane can tighten any further, the candidate opens on whatever is free
- * above the finished lanes' integration slots — its review rounds then check
- * the budget per call — or, with nothing free, resolves as "blocked" instead
+ * above the finished lanes' integration slots — its review/fix rounds then
+ * check the budget per call, excluding other lanes' reservations while keeping
+ * its own slots eligible — or, with nothing free, resolves as "blocked" instead
  * of dying mid-call. The single conflict re-merge attempt is likewise guarded
  * at call time rather than reserved up front.
  */
@@ -404,8 +405,9 @@ function releaseReserve(key) {
   if (held || wasActive) wakeWaiters();
 }
 
-function canSpend(calls) {
-  return callsRemaining() >= calls;
+function canSpend(key, calls) {
+  const ownReserve = reserves.get(key) || 0;
+  return callsRemaining() - (totalReserved() - ownReserve) >= calls;
 }
 
 async function admit(spec) {
@@ -752,7 +754,7 @@ async function reviewLane(state) {
     // Remaining worst case for this lane: the rounds left, plus rebase and
     // integrator.
     setReserve(spec.index, 2 * (spec.maxRounds - round + 1) + 2);
-    if (!canSpend(1)) {
+    if (!canSpend(spec.index, 1)) {
       state.status = "unresolved";
       state.reason =
         "agent-call budget exhausted before review round " +
@@ -870,7 +872,7 @@ async function reviewLane(state) {
       log("lanes: " + spec.label + " unresolved — " + state.reason);
       return state;
     }
-    if (!canSpend(1)) {
+    if (!canSpend(spec.index, 1)) {
       state.status = "unresolved";
       state.findings = blocking.concat(minor);
       state.reason =
@@ -1051,7 +1053,7 @@ for (const state of laneStates) {
     log("lanes: " + state.lane + " blocked — " + state.reason);
     continue;
   }
-  if (!canSpend(1)) {
+  if (!canSpend(state.index, 1)) {
     state.status = "blocked";
     state.reason =
       "agent-call budget exhausted before integrating " + state.branch;
@@ -1080,7 +1082,11 @@ for (const state of laneStates) {
         : outcome.conflictedPaths.join(", ")) +
       "; sending one rebase attempt to its executor",
   );
-  if (state.threadId === null || integrationBranchName === null || !canSpend(2)) {
+  if (
+    state.threadId === null ||
+    integrationBranchName === null ||
+    !canSpend(state.index, 2)
+  ) {
     state.status = "blocked";
     state.conflictedPaths = outcome.conflictedPaths;
     state.reason =

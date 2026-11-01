@@ -95,6 +95,10 @@ live. Successful calls are reusable regardless of which tools they used,
 including file edits and other writes, because resume is restricted to the same
 environment workspace where those effects remain. Runs created before
 replay-safety metadata existed replay nothing.
+Identity-reporting calls replay their original worker ID, environment, branch,
+and authoritative host `changedFiles` count, including across successive resumes.
+Those historical identities do not transfer worker continuation or worktree
+teardown ownership to the resumed run.
 
 Agent calls retry transient provider failures twice with bounded backoff before
 the failure reaches the workflow script. Retryability comes from an explicit
@@ -273,6 +277,20 @@ outstanding runs and retires all owned attempts; retained history remains
 available until its usual expiry. Missed origin events are reconciled from
 current thread state. A worker being spawned when cancellation occurs is
 recorded and retired when it returns or is rediscovered.
+
+Lane worktree provisioning may finish after `threads.spawn` returns. The stored
+placement request retains that intent, but destructive ownership is recorded only
+after the worker resolves to a managed worktree in the run's project. Existing
+environment placements and replayed identities never acquire that ownership.
+Structured-result calls wait for outstanding worker shutdown before workspace
+postprocessing or a sequential continuation. A queued continuation stays pending
+until BB's durable turn-request event proves its submitted prompt was admitted;
+the worker's previous idle output cannot complete or repair the new call.
+
+Teardown only considers worktrees actually provisioned by the finished run.
+Besides retaining dirty or unverifiable workspaces, it retains environments used
+by another queued/running workflow or any unarchived external thread, even when
+discarding uncommitted files was explicitly requested.
 
 Notifications to archived or deleted origins are settled as abandoned. Other
 send failures remain retryable, including unrelated HTTP 409 conflicts.

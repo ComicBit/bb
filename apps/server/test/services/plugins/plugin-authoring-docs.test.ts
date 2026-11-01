@@ -50,7 +50,6 @@ import {
   type PluginThreadEventPayloads,
   type ExperimentalThreadActionTabProps,
   type ThreadChatMessageAction,
-  type ThreadChatProps,
 } from "@get-bb/plugin-sdk";
 
 const FRONTEND_RUNTIME_EXPORT_NAMES = Object.keys(pluginSdkApp).sort();
@@ -604,26 +603,6 @@ const _assertAllCommandPaletteActionRegistrationFieldsListed: MissingCommandPale
   : never = true;
 void _assertAllCommandPaletteActionRegistrationFieldsListed;
 
-const THREAD_CHAT_PROP_FIELDS = [
-  "threadId",
-  "variant",
-  "layout",
-  "focusRequest",
-  "permissionPolicy",
-  "className",
-  "leadingContent",
-  "messageActions",
-] as const satisfies readonly (keyof ThreadChatProps)[];
-
-type MissingThreadChatPropField = Exclude<
-  keyof ThreadChatProps,
-  (typeof THREAD_CHAT_PROP_FIELDS)[number]
->;
-const _assertAllThreadChatPropFieldsListed: MissingThreadChatPropField extends never
-  ? true
-  : never = true;
-void _assertAllThreadChatPropFieldsListed;
-
 const THREAD_CHAT_MESSAGE_ACTION_FIELDS = [
   "id",
   "title",
@@ -823,15 +802,6 @@ describe("bb-plugin-authoring skill", () => {
       expect(
         skill,
         `commandPaletteAction registration field "${field}" is not documented in the skill`,
-      ).toContain(field);
-    }
-  });
-
-  it("documents every ThreadChat prop", () => {
-    for (const field of THREAD_CHAT_PROP_FIELDS) {
-      expect(
-        skill,
-        `ThreadChat prop "${field}" is not documented in the skill`,
       ).toContain(field);
     }
   });

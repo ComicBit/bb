@@ -887,6 +887,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     label: string,
     run: (signal: AbortSignal) => T | Promise<T>,
     callerSignal?: AbortSignal,
+    settlement: "releasable" | "cleanup" = "releasable",
   ): Promise<PluginInvocationOutcome<T>> {
     const id = instance.pluginId;
     const released = instance.released.signal;
@@ -913,7 +914,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       () => undefined,
       () => undefined,
     );
-    instance.invocations.add(settled);
+    instance.invocations.set(settled, settlement);
     void settled.then(() => {
       instance.invocations.delete(settled);
       const elapsedMs = performance.now() - startedAt;
@@ -922,19 +923,25 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       if (elapsedMs > stats.maxMs) stats.maxMs = elapsedMs;
     });
     let releaseCaller: (() => void) | undefined;
-    const callerReleased = new Promise<never>((_resolve, reject) => {
+    let result = execution;
+    if (settlement === "releasable") {
+      let rejectCaller!: (reason: Error) => void;
+      const callerReleased = new Promise<never>((_, reject) => {
+        rejectCaller = reject;
+      });
       releaseCaller = () =>
-        reject(
+        rejectCaller(
           new Error(
             `plugin "${id}" was reloaded or disabled before ${label} finished`,
           ),
         );
       released.addEventListener("abort", releaseCaller, { once: true });
-    });
+      result = Promise.race([execution, callerReleased]);
+    }
     try {
       return {
         ok: true,
-        value: await Promise.race([execution, callerReleased]),
+        value: await result,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -981,13 +988,16 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   async function drainInvocations(instance: LoadedPlugin): Promise<void> {
     if (instance.invocations.size === 0) return;
     const drained = await settledWithin(
-      Promise.all([...instance.invocations]),
+      Promise.all(instance.invocations.keys()),
       serviceStopTimeoutMs,
     );
     if (!drained) {
       logger.warn(
-        `plugin ${instance.pluginId}: ${instance.invocations.size} in-flight invocation(s) did not settle before dispose; releasing their callers`,
+        `plugin ${instance.pluginId}: ${instance.invocations.size} in-flight invocation(s) did not settle within ${serviceStopTimeoutMs}ms of dispose`,
       );
+    }
+    for (const [invocation, settlement] of instance.invocations) {
+      if (settlement === "cleanup") await invocation;
     }
   }
 
@@ -1603,7 +1613,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return `service ${[...hung].join(", ")} did not stop`;
   }
 
-  function discardCandidate(candidate: LoadedPlugin): void {
+  async function discardCandidate(candidate: LoadedPlugin): Promise<void> {
     candidate.stopping.abort();
     try {
       deps.pendingInteractions?.interruptOwnedPluginInteractions(candidate);
@@ -1611,6 +1621,9 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       logger.warn(
         `plugin ${candidate.pluginId} interaction cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+    for (const [invocation, settlement] of candidate.invocations) {
+      if (settlement === "cleanup") await invocation;
     }
     for (const database of candidate.handle.databaseHandles.splice(0)) {
       try {
@@ -1773,12 +1786,14 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       db: deps.db,
       dataDir: deps.dataDir,
       getSdk: () => boundSdk,
+      isCurrentGeneration: () =>
+        !stopping.signal.aborted && loaded.get(row.id) === plugin,
       recovery: deps.recovery,
       completeAi: (input) => completeRegisteredAiService(deps.aiServices, input),
-      runOwnedOperation: async (label, run, callerSignal) => {
+      runOwnedOperation: async (label, run, callerSignal, settlement) => {
         if (stopping.signal.aborted) throw new PluginContextStaleError(row.id);
         callerSignal?.throwIfAborted();
-        const outcome = await invokeWrapped(plugin, label, run, callerSignal);
+        const outcome = await invokeWrapped(plugin, label, run, callerSignal, settlement);
         if (!outcome.ok) throw outcome.cause ?? new Error(outcome.error);
         return outcome.value;
       },
@@ -1983,7 +1998,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       hostArtifact: hostArtifactCandidate,
       stopping,
       released: new AbortController(),
-      invocations: new Set(),
+      invocations: new Map(),
     };
     try {
       const serverEntry = await resolveServerEntry(row, manifest);
@@ -2039,7 +2054,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       );
     } catch (error) {
       for (const rollback of rollbackGenerations.reverse()) rollback();
-      discardCandidate(plugin);
+      await discardCandidate(plugin);
       let message = error instanceof Error ? error.message : String(error);
       if (/ERR_DLOPEN_FAILED|\.node/.test(message)) {
         message += " (native dependencies are not supported in BB plugins)";
@@ -2070,7 +2085,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
           error instanceof Error ? error.message : String(error)
         }`;
       }
-      discardCandidate(plugin);
+      await discardCandidate(plugin);
       setStatus(row.id, "error", hostArtifactProblem);
       logger.warn(`plugin ${row.id} failed to load: ${hostArtifactProblem}`);
       return hostArtifactProblem;

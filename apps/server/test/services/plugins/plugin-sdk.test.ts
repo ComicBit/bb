@@ -35,6 +35,8 @@ import { PluginHostArtifactRegistry } from "../../../src/services/plugins/plugin
 import { startTestServer, testLogger } from "../../helpers/test-app.js";
 import {
   defineRpcContract,
+  type ExperimentalRecovery,
+  type ExperimentalRecoverySnapshot,
   type ExperimentalRecoverySafeguardsReceipt,
   type PluginAiCompleteOptions,
 } from "@get-bb/plugin-sdk";
@@ -116,6 +118,9 @@ describe("plugin bb.sdk bind gate", () => {
   let pluginHostArtifacts: PluginHostArtifactRegistry;
   let appUrl: string | null;
   let aiServices: AiServiceRegistry;
+  const continueRecovery = vi.fn<ExperimentalRecovery["continue"]>(
+    async () => ({ admitted: false, reason: "policy" }),
+  );
   const verifySafeguards = vi.fn(
     async (_args?: { signal?: AbortSignal }): Promise<ExperimentalRecoverySafeguardsReceipt> => {
       throw new Error("No safeguard verifier configured for this test");
@@ -212,11 +217,12 @@ describe("plugin bb.sdk bind gate", () => {
     pluginHostArtifacts = new PluginHostArtifactRegistry();
     aiServices = createAiServiceRegistry();
     verifySafeguards.mockClear();
+    continueRecovery.mockClear();
     service = createPluginService({
       aiServices,
       recovery: {
         snapshot: () => null,
-        continue: async () => ({ admitted: false, reason: "policy" }),
+        continue: continueRecovery,
         verifySafeguards,
       },
       telemetry: createNoopTelemetryService(),
@@ -403,6 +409,71 @@ describe("plugin bb.sdk bind gate", () => {
   });
 
   it.each(["disable", "reload"] as const)(
+    "refuses prepared continuation admission while %s waits for old-generation disposal",
+    async (action) => {
+      const rootDir = await writePlugin(workDir, {
+        name: "bb-plugin-continuation-owner",
+        serverSource: `export default function plugin() {}`,
+      });
+      await service.installPath(rootDir);
+      const api = requireApi(service, "continuation-owner");
+      const snapshot: ExperimentalRecoverySnapshot = {
+        threadId: "thread", projectId: "project", revision: "revision", eventSequence: 2,
+        status: "idle", providerId: "codex", hostId: "host", hostOnline: true,
+        visibility: "visible", parentThreadId: null, archivedAt: null, deletedAt: null,
+        pluginMetadata: {}, metadataReadable: true,
+        run: { requestId: "request", requestSequence: 1, initiator: "user", provenance: "fresh-user", freshUserRequestId: "request", freshUserSequence: 1 },
+        stop: null, finalAssistant: { messageId: "assistant", revision: 2, text: "I will continue next." },
+        queuedMessageCount: 0, pendingInteractionCount: 0, activeBackgroundTaskCount: 0,
+      };
+      let releasePreparation!: () => void;
+      const prepared = new Promise<void>((resolve) => { releasePreparation = resolve; });
+      const appended = vi.fn();
+      continueRecovery.mockImplementationOnce(async (args) => {
+        await prepared;
+        if (!args.admit()) return { admitted: false, reason: "policy" };
+        appended();
+        return { admitted: true, reason: "admitted" };
+      });
+      let releaseDisposal!: () => void;
+      const disposeGate = new Promise<void>((resolve) => { releaseDisposal = resolve; });
+      let disposing = false;
+      api.onDispose(async () => {
+        disposing = true;
+        await disposeGate;
+      });
+      const admit = vi.fn(() => true);
+      const pending = api.experimental_recovery.continue({ snapshot, admit });
+      let disposed = false;
+      const disposal = (action === "disable"
+        ? service.setEnabled("continuation-owner", false)
+        : service.reload("continuation-owner")).then(() => { disposed = true; });
+      try {
+        await vi.waitFor(() => expect(disposing).toBe(true));
+        releasePreparation();
+        await expect(pending).resolves.toEqual({ admitted: false, reason: "policy" });
+        expect(admit).not.toHaveBeenCalled();
+        expect(appended).not.toHaveBeenCalled();
+        expect(disposed).toBe(false);
+      } finally {
+        releasePreparation();
+        releaseDisposal();
+        await disposal;
+      }
+      if (action === "reload") {
+        const replacement = requireApi(service, "continuation-owner");
+        expect(replacement).not.toBe(api);
+        continueRecovery.mockImplementationOnce(async (args) => args.admit()
+          ? { admitted: true, reason: "admitted" }
+          : { admitted: false, reason: "policy" });
+        await expect(replacement.experimental_recovery.continue({ snapshot, admit })).resolves.toEqual({
+          admitted: true, reason: "admitted",
+        });
+      }
+    },
+  );
+
+  it.each(["disable", "reload"] as const)(
     "cancels owned safeguard verification on %s and awaits its cleanup",
     async (action) => {
       const rootDir = await writePlugin(workDir, {
@@ -412,20 +483,27 @@ describe("plugin bb.sdk bind gate", () => {
       await service.installPath(rootDir);
       const api = requireApi(service, "verifier-owner");
       let signal: AbortSignal | undefined;
-      const { promise: cleanup, resolve: release } = Promise.withResolvers<void>();
+      let release!: () => void;
+      const cleanup = new Promise<void>((resolve) => { release = resolve; });
       verifySafeguards.mockImplementationOnce(async (args) => {
-        signal = args?.signal;
-        if (!signal) throw new Error("Missing verifier cancellation signal");
-        const aborted = Promise.withResolvers<void>();
-        signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-        await aborted.promise;
+        const verificationSignal = args?.signal;
+        signal = verificationSignal;
+        if (!verificationSignal) throw new Error("Missing verifier cancellation signal");
+        const aborted = new Promise<void>((resolve) => {
+          verificationSignal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await aborted;
         await cleanup;
-        signal.throwIfAborted();
+        verificationSignal.throwIfAborted();
         throw new Error("Verifier must not return after cancellation");
       });
       const caller = new AbortController();
-      const pending = api.experimental_recovery.verifySafeguards({ signal: caller.signal }).catch((error: unknown) => error);
+      let callerSettled = false;
+      const pending = api.experimental_recovery.verifySafeguards({ signal: caller.signal })
+        .catch((error: unknown) => error)
+        .finally(() => { callerSettled = true; });
       await vi.waitFor(() => expect(signal).toBeDefined());
+      vi.useFakeTimers();
       let disposed = false;
       const disposal = (action === "disable"
         ? service.setEnabled("verifier-owner", false)
@@ -434,16 +512,61 @@ describe("plugin bb.sdk bind gate", () => {
         await vi.waitFor(() => expect(signal?.aborted).toBe(true));
         expect(caller.signal.aborted).toBe(false);
         expect(disposed).toBe(false);
+        await vi.advanceTimersByTimeAsync(5_001);
+        expect(callerSettled).toBe(false);
+        expect(disposed).toBe(false);
         await expect(api.experimental_recovery.verifySafeguards()).rejects.toThrow(/stale API handle/u);
         expect(verifySafeguards).toHaveBeenCalledOnce();
       } finally {
         release();
+        vi.useRealTimers();
         await disposal;
       }
       expect(await pending).toBeInstanceOf(Error);
       expect(disposed).toBe(true);
     },
   );
+
+  it("retains failed factory verification ownership until native cleanup settles", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-verifier-failed-factory",
+      serverSource: `export default function plugin(bb) {
+        void bb.experimental_recovery.verifySafeguards().catch(() => {});
+        throw new Error("Verifier fixture factory failed");
+      }`,
+    });
+    let signal: AbortSignal | undefined;
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    verifySafeguards.mockImplementationOnce(async (args) => {
+      const verificationSignal = args?.signal;
+      signal = verificationSignal;
+      if (!verificationSignal) throw new Error("Missing verifier cancellation signal");
+      let onAbort!: () => void;
+      const aborted = new Promise<void>((resolve) => { onAbort = resolve; });
+      if (verificationSignal.aborted) onAbort();
+      else verificationSignal.addEventListener("abort", () => onAbort(), { once: true });
+      await aborted;
+      await cleanup;
+      verificationSignal.throwIfAborted();
+      throw new Error("Verifier must not return after cancellation");
+    });
+    let settled = false;
+    const installation = service.installPath(rootDir)
+      .catch((error: unknown) => error)
+      .finally(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      expect(settled).toBe(false);
+    } finally {
+      releaseCleanup();
+      await installation;
+    }
+    expect(service.list().find((plugin) => plugin.id === "verifier-failed-factory")).toMatchObject({
+      status: "error",
+      detail: expect.stringContaining("Verifier fixture factory failed"),
+    });
+  });
 
   it("preserves caller cancellation for owned safeguard verification", async () => {
     const rootDir = await writePlugin(workDir, {
@@ -454,12 +577,14 @@ describe("plugin bb.sdk bind gate", () => {
     const api = requireApi(service, "verifier-caller");
     let signal: AbortSignal | undefined;
     verifySafeguards.mockImplementationOnce(async (args) => {
-      signal = args?.signal;
-      if (!signal) throw new Error("Missing verifier cancellation signal");
-      const aborted = Promise.withResolvers<void>();
-      signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-      await aborted.promise;
-      signal.throwIfAborted();
+      const verificationSignal = args?.signal;
+      signal = verificationSignal;
+      if (!verificationSignal) throw new Error("Missing verifier cancellation signal");
+      const aborted = new Promise<void>((resolve) => {
+        verificationSignal.addEventListener("abort", () => resolve(), { once: true });
+      });
+      await aborted;
+      verificationSignal.throwIfAborted();
       throw new Error("Verifier must not return after cancellation");
     });
     const caller = new AbortController();
@@ -481,9 +606,10 @@ describe("plugin bb.sdk bind gate", () => {
       });
       await service.installPath(rootDir);
       const complete = vi.fn(async (_prompt: string, options: PluginAiCompleteOptions) => {
-        const aborted = Promise.withResolvers<void>();
-        options.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-        await aborted.promise;
+        const aborted = new Promise<void>((resolve) => {
+          options.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await aborted;
         options.signal.throwIfAborted();
         return "Must not return after cancellation";
       });

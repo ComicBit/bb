@@ -96,6 +96,7 @@ interface WorkspaceState {
 interface LaneSetupOptions {
   brain: Brain;
   workspaces?: Record<string, Partial<WorkspaceState>>;
+  maxAgentCalls?: number;
 }
 
 function setup(options: LaneSetupOptions) {
@@ -325,7 +326,11 @@ function setup(options: LaneSetupOptions) {
 
   db = bb.storage.database();
   bb.storage.migrate(db, migrations);
-  const service = createWorkflowService(bb, db, DEFAULT_WORKFLOW_SETTINGS);
+  const service = createWorkflowService(bb, db, {
+    ...DEFAULT_WORKFLOW_SETTINGS,
+    maxAgentCalls:
+      options.maxAgentCalls ?? DEFAULT_WORKFLOW_SETTINGS.maxAgentCalls,
+  });
   const database = db;
 
   /** Answer every worker that is waiting on a structured result. */
@@ -611,6 +616,66 @@ describe("lanes example end to end", () => {
       "spawn  integrate:beta -> child-6 [reuse environment-lane-5] succeeded",
     ]);
   });
+
+  it.each([6, 7])(
+    "protects an approved lane's integration reserve with a %i-call budget",
+    async (maxAgentCalls) => {
+      const test = setup({
+        maxAgentCalls,
+        brain: (call): JsonValue => {
+          switch (call.kind) {
+            case "exec":
+              return { changed: true, summary: `${call.lane} implemented` };
+            case "review":
+              return call.lane === "alpha"
+                ? { approved: true, findings: [] }
+                : { approved: false, findings: [BLOCKING] };
+            case "fix":
+              return { addressed: true, summary: "blocking finding fixed" };
+            case "merge":
+              return { merged: true, conflictedPaths: [], conflictHunks: "" };
+            default:
+              throw new Error(`unexpected ${call.kind} call ${call.title}`);
+          }
+        },
+      });
+      harnesses.push(test.harness);
+
+      const run = await test.start({
+        runId: "parked-integration-reserve",
+        lanes: [
+          { label: "alpha", prompt: "build alpha", maxRounds: 3 },
+          { label: "beta", prompt: "build beta", maxRounds: 3 },
+        ],
+      });
+      const finished = await test.runToCompletion(run.id);
+      const result = lanesOf(finished.resultJson);
+      const [alpha, beta] = result.lanes as [LaneResult, LaneResult];
+
+      expect(alpha.status).toBe("succeeded");
+      expect(alpha.rounds).toBe(1);
+      expect(alpha.reason).toBe("merged into " + result.integrationBranchName);
+      expect(beta.status).toBe("unresolved");
+      expect(beta.rounds).toBe(1);
+      expect(beta.reason).toBe(
+        maxAgentCalls === 6
+          ? "agent-call budget exhausted before fix round 1 with 1 blocking finding(s) outstanding"
+          : "agent-call budget exhausted before review round 2; work is committed but unreviewed",
+      );
+      // Alpha finishes before beta opens on a degraded reserve. Beta may
+      // spend its own remaining slots, but neither a fix nor another review
+      // may take alpha's two parked integration slots.
+      expect(test.spawnTitles()).toEqual([
+        "exec:alpha",
+        "review:alpha:1",
+        "exec:beta",
+        "review:beta:1",
+        "integrate:alpha",
+      ]);
+      expect(test.workerSends()).toHaveLength(maxAgentCalls === 6 ? 0 : 1);
+      expect(test.sequence(run.id)).toHaveLength(maxAgentCalls - 1);
+    },
+  );
 
   it.each([false, true])("fixes blockers despite approved:%s", async (approved) => {
     const test = setup({

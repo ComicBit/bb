@@ -48,7 +48,6 @@ import type { TestAppHarness } from "../helpers/test-app.js";
 import { setPluginAgentContributions } from "../../src/services/plugins/plugin-agent-contributions.js";
 import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import type { PluginAgentToolRecord } from "../../src/services/plugins/plugin-api.js";
-import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import { resumeEnvironmentProvisioningForHost } from "../../src/services/environments/environment-engine.js";
 
 async function postEventBatch(args: {

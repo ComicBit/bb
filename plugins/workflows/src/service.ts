@@ -11,6 +11,7 @@ import {
 import {
   abandonOriginNotifications,
   hasWorker,
+  hasActiveEnvironmentConsumer,
   ownWorker,
   workerOrigins,
   isWorkerRetired,
@@ -490,6 +491,7 @@ export function createWorkflowService(
   const idleHandlerTasks = new Map<string, Promise<void>>();
   const childStops = new Map<string, Promise<void>>();
   const continuingWorkers = new Set<string>();
+  const continuationAdmissions = new Map<string, { afterSeq: number; prompt: string; pending: boolean }>();
   const waiters = new Map<
     string,
     { resolve: (value: JsonValue) => void; reject: (error: Error) => void }
@@ -806,7 +808,8 @@ export function createWorkflowService(
       projectId: input.projectId,
       originThreadId: input.originThreadId,
       environmentId: origin.environmentId,
-      launchBaseCommit: launchStatus?.outcome === "available"
+      launchBaseCommit: launchStatus?.outcome === "available" &&
+        (launchStatus.workspace.checkout.kind === "branch" || launchStatus.workspace.checkout.kind === "detached")
         ? launchStatus.workspace.checkout.headSha
         : null,
       originProvider: origin.providerId,
@@ -1050,7 +1053,7 @@ export function createWorkflowService(
       threadId: child.id,
       environmentId: child.environmentId ?? null,
       branchName: null,
-      provisionedEnvironment: options.environment?.kind === "worktree" && child.environmentId != null,
+      provisionedEnvironment: false,
     };
   }
 
@@ -1069,10 +1072,11 @@ export function createWorkflowService(
     if (
       !hasWorker(db, threadId) || previous === null ||
       previous.runId !== run.id || previous.status !== "succeeded" ||
-      previous.environmentId === null
+      previous.replayedFromCallId !== null || previous.environmentId === null
     ) {
       throw new Error(`Cannot continue worker ${threadId}: it is not an idle worker owned by this run`);
     }
+    await childStops.get(threadId);
     const thread = await bb.sdk.threads.get({ threadId });
     if (
       thread.projectId !== run.projectId || thread.archivedAt != null ||
@@ -1101,8 +1105,14 @@ export function createWorkflowService(
    */
   async function resolveWorkerPlacement(
     threadId: string,
+    provisionRequested: boolean,
+    expectedEnvironmentId: string | null,
+    run: WorkflowRunRow,
   ): Promise<WorkerPlacement> {
     const thread = await bb.sdk.threads.get({ threadId });
+    if (thread.status !== "idle") {
+      throw new Error(`Cannot postprocess worker ${threadId}: shutdown has not reached idle`);
+    }
     if (thread.environmentId === null) {
       return { threadId, environmentId: null, branchName: null };
     }
@@ -1113,6 +1123,11 @@ export function createWorkflowService(
       threadId,
       environmentId: environment.id,
       branchName: environment.branchName,
+      provisionedEnvironment: provisionRequested &&
+        (expectedEnvironmentId === null || expectedEnvironmentId === environment.id) &&
+        environment.id !== run.environmentId && environment.projectId === run.projectId &&
+        environment.managed && environment.isWorktree &&
+        environment.workspaceProvisionType === "managed-worktree",
     };
   }
 
@@ -1227,6 +1242,7 @@ export function createWorkflowService(
                 options,
                 { ...sameRunCall, threadId: sameRunCall.childThreadId },
                 reuse.result,
+                sameRunCall.changedFiles,
               );
             }
           }
@@ -1260,11 +1276,14 @@ export function createWorkflowService(
                 replay: { callId: candidate.id, result: reuse.result },
               });
               publishRunsChanged(run.originThreadId);
-              recordCallPlacement(db, replayed.id, { ...candidate, provisionedEnvironment: false });
+              recordCallPlacement(db, replayed.id, {
+                ...candidate, threadId: candidate.childThreadId, provisionedEnvironment: false,
+              });
               return callResult(
                 options,
                 { ...candidate, threadId: candidate.childThreadId },
                 reuse.result,
+                candidate.changedFiles,
               );
             }
           }
@@ -1310,6 +1329,16 @@ export function createWorkflowService(
           await stopChild(worker.threadId);
           throw new Error("Workflow cancelled");
         }
+        if (continuing !== null) {
+          const events = await bb.sdk.threads.events.list({
+            threadId: worker.threadId, order: "desc", limit: "1",
+          });
+          continuationAdmissions.set(call.id, {
+            afterSeq: events[0]?.seq ?? 0,
+            prompt: childPrompt(run, prompt, options),
+            pending: true,
+          });
+        }
         const attached = attachCallThread(db, call.id, worker.threadId, worker);
         if (!attached || signal.aborted) {
           await stopChild(worker.threadId);
@@ -1318,11 +1347,14 @@ export function createWorkflowService(
         publishRunsChanged(run.originThreadId);
         spawningCalls.delete(call.id);
         if (continuing !== null) {
-          await bb.sdk.threads.send({
+          const admission = continuationAdmissions.get(call.id)!;
+          const sent = await bb.sdk.threads.send({
             threadId: worker.threadId,
             mode: "auto",
-            input: [{ type: "text", text: childPrompt(run, prompt, options), mentions: [] }],
+            input: [{ type: "text", text: admission.prompt, mentions: [] }],
           });
+          if (sent.delivery === "sent") continuationAdmissions.delete(call.id);
+          else admission.pending = false;
           throwIfCancelled(signal);
         }
         const stopOnAbort = () => void stopChild(worker.threadId);
@@ -1355,16 +1387,20 @@ export function createWorkflowService(
         }
         try {
           const value = await waitForCall(call, signal);
+          await childStops.get(worker.threadId);
+          throwIfCancelled(signal);
           const inLaneWorkspace =
             options.environment !== null || options.continueThreadId !== null;
           if (!options.reportIdentity && !inLaneWorkspace) {
             return value;
           }
-          const placement = await resolveWorkerPlacement(worker.threadId);
-          placement.provisionedEnvironment = worker.provisionedEnvironment === true &&
-            worker.environmentId === placement.environmentId;
+          const placement = await resolveWorkerPlacement(
+            worker.threadId, options.environment?.kind === "worktree",
+            worker.environmentId, run,
+          );
           recordCallPlacement(db, call.id, placement);
           const workspace = await closeOutWorkspace(run, placement);
+          recordCallPlacement(db, call.id, { ...placement, changedFiles: workspace.changedFiles });
           return callResult(options, placement, value, workspace.changedFiles);
         } finally {
           signal.removeEventListener("abort", stopOnAbort);
@@ -1390,6 +1426,7 @@ export function createWorkflowService(
         );
         await sleep(delay, signal);
       } finally {
+        continuationAdmissions.delete(call.id);
         if (claimedContinuation !== null) continuingWorkers.delete(claimedContinuation);
       }
     }
@@ -1420,6 +1457,27 @@ export function createWorkflowService(
   ): Promise<void> {
     const call = getCallByChildThread(db, threadId);
     if (call === null || call.status !== "running") return;
+    const admission = continuationAdmissions.get(call.id);
+    if (admission !== undefined) {
+      if (admission.pending) return;
+      // Queue disappearance is not admission (it may have been cancelled).
+      // A durable turn request containing our input proves it was submitted.
+      const requests = await bb.sdk.threads.events.list({
+        threadId, afterSeq: String(admission.afterSeq),
+        types: ["client/turn/requested"], order: "asc", limit: "100",
+      });
+      const submitted = requests.some((event) =>
+        event.type === "client/turn/requested" &&
+        event.data.originPluginId === bb.pluginId &&
+        [event.data.input, ...(event.data.inputGroups ?? [])].some((group) =>
+          group.some((input) => input.type === "text" && input.text === admission.prompt)),
+      );
+      if (!submitted) return;
+      const current = await bb.sdk.threads.get({ threadId });
+      if (current.status !== "idle") return;
+      output = (await bb.sdk.threads.output({ threadId })).output;
+      continuationAdmissions.delete(call.id);
+    }
     const options = parseStoredAgentOptions(JSON.parse(call.optionsJson));
     if (options.outputSchema !== null) {
       if (call.resultJson !== null) {
@@ -1588,8 +1646,9 @@ export function createWorkflowService(
           result: resolved.value,
           error: null,
         });
+        const stopping = stopChild(threadId);
         wakeCall(call);
-        await stopChild(threadId);
+        await stopping;
         return { ok: true };
       }
       if (stored === "idempotent") {
@@ -2110,6 +2169,29 @@ export function createWorkflowService(
         const environment = await bb.sdk.environments.get({ environmentId: lane.environmentId });
         if (environment.projectId !== run.projectId) {
           report.kept.push({ ...lane, reason: "environment no longer belongs to this project" });
+          continue;
+        }
+        if (hasActiveEnvironmentConsumer(db, lane.environmentId, runId)) {
+          report.kept.push({ ...lane, reason: "environment is used by another active workflow" });
+          continue;
+        }
+        const ownedThreads = new Set(listCallsForRun(db, runId)
+          .filter((call) => call.replayedFromCallId === null)
+          .map((call) => call.childThreadId));
+        let externalConsumer = false;
+        for (let offset = 0; ; offset += 100) {
+          const threads = await bb.sdk.threads.list({
+            environmentId: lane.environmentId, archived: false, includeHidden: true,
+            limit: 100, offset,
+          });
+          if (threads.some((thread) => !ownedThreads.has(thread.id))) {
+            externalConsumer = true;
+            break;
+          }
+          if (threads.length < 100) break;
+        }
+        if (externalConsumer) {
+          report.kept.push({ ...lane, reason: "environment has unarchived external consumers" });
           continue;
         }
         const status = await readWorkspaceStatus(lane.environmentId);

@@ -57,7 +57,7 @@ export interface LoadedPlugin {
   hostArtifact: PluginHostArtifactSnapshot | null;
   stopping: AbortController;
   released: AbortController;
-  invocations: Set<Promise<void>>;
+  invocations: Map<Promise<void>, "releasable" | "cleanup">;
 }
 
 export interface PluginHostArtifactSnapshot {

@@ -3,6 +3,10 @@
 ## Unreleased
 
 - Add omp CLI maintenance to the existing ACP provider in Settings → Updates and `bb updates`, with channel-aware release checks and verified self-updates, without registering another harness.
+- Preserve recorded voice input across composer remounts and transcription failures; apply live plugin tool updates to running ACP threads and allow long human-blocking omp tool calls without extending bridge startup deadlines.
+- Add ownership-aware workflow lane placement, worker continuation, review/integration budgeting, and conservative environment retirement.
+- Add experimental create-only conversations, collapsible embedded thread history, native recovery snapshots and guarded continuations, and owned-process safeguard verification. These native/plugin contracts require matching source-built app, host protocol 259, and Plugin SDK 0.6.110; updating an installed plugin alone does not activate them.
+- Keep Unwedger retries behind native retry admission without stopping a thread that may already have resumed.
 
 ## 0.48.0
 

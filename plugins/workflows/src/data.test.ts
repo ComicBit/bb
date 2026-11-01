@@ -4,6 +4,7 @@ import { DEFAULT_WORKFLOW_SETTINGS } from "./settings.js";
 import type { WorkflowAgentOptions } from "./types.js";
 import {
   attachCallThread,
+  hasActiveEnvironmentConsumer,
   isWorkerRetired,
   retiredWorkers,
   recordWorkerCleanup,
@@ -340,6 +341,55 @@ describe("workflow durable data", () => {
     ]);
     expect(getCall(db, run.id, 1)?.provisionedEnvironment).toBe(false);
     expect(getCall(db, run.id, 2)?.provisionedEnvironment).toBe(false);
+  });
+
+  it("persists replay identity and authoritative counts without acquiring worker ownership", () => {
+    const original = newRun();
+    markRunning(original.id);
+    const call = startCall(db, {
+      runId: original.id, callIndex: 0, cacheKey: "key", prompt: "build",
+      options: agentOptions(), selection: resolvedSelection, replay: null,
+    });
+    attachCallThread(db, call.id, "worker", {
+      environmentId: "lane", branchName: "bb/lane", provisionedEnvironment: true,
+    });
+    settleCall(db, { id: call.id, status: "succeeded", result: "built", error: null });
+    recordCallPlacement(db, call.id, {
+      environmentId: "lane", branchName: "bb/lane", changedFiles: 4,
+    });
+    const resumed = newRun();
+    markRunning(resumed.id);
+    const replay = startCall(db, {
+      runId: resumed.id, callIndex: 0, cacheKey: "key", prompt: "build",
+      options: agentOptions(), selection: resolvedSelection,
+      replay: { callId: call.id, result: "built" },
+    });
+    recordCallPlacement(db, replay.id, {
+      environmentId: "lane", branchName: "bb/lane", threadId: "worker",
+      provisionedEnvironment: false, changedFiles: 4,
+    });
+    recordCallPlacement(db, replay.id, { environmentId: "lane", branchName: "bb/lane" });
+    expect(getCall(db, resumed.id, 0)).toMatchObject({
+      childThreadId: "worker", changedFiles: 4, provisionedEnvironment: false,
+    });
+    expect(listRunProvisionedEnvironments(db, resumed.id)).toEqual([]);
+    expect(db.prepare("SELECT run_id FROM workflow_workers WHERE thread_id = 'worker'").get())
+      .toEqual({ run_id: original.id });
+  });
+
+  it("detects other active workflows before an existing-environment worker is attached", () => {
+    const owner = newRun();
+    const borrower = newRun();
+    markRunning(borrower.id);
+    startCall(db, {
+      runId: borrower.id, callIndex: 0, cacheKey: "borrow", prompt: "review",
+      options: agentOptions({ environment: { kind: "existing", environmentId: "lane" } }),
+      selection: resolvedSelection, replay: null,
+    });
+    expect(hasActiveEnvironmentConsumer(db, "lane", owner.id)).toBe(true);
+    settleRun(db, { id: borrower.id, status: "cancelled", result: null, error: "stopped" });
+    expect(hasActiveEnvironmentConsumer(db, "lane", owner.id)).toBe(false);
+    expect(hasActiveEnvironmentConsumer(db, "environment-1", owner.id)).toBe(false);
   });
 
   it("records replay safety", () => {

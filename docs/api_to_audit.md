@@ -4282,10 +4282,12 @@ snapshots rather than reusing a prior token.
 is `admitted`, `changed`, `unsafe` or `policy`. It can submit only the native
 fixed text `please continue`. Ordinary `message.dispatch` hooks still apply:
 wait or rejection refuses this continuation without queuing it. After async
-preparation, native state must match the snapshot, plugin enabled/live state
-must still allow it, and the synchronous caller policy/paused callback must
-approve inside the final input append transaction. It is not a general
-arbitrary-input send or a queue bypass.
+preparation, native state must match the snapshot, the plugin must still be the
+current enabled generation and not stopping, and the synchronous caller
+policy/paused callback must approve inside the final input append transaction.
+Generation ownership is checked before and after that callback, including
+while an outgoing generation's disposal hooks are still pending. It is not a
+general arbitrary-input send or a queue bypass.
 
 Native Stop persists its marker before the first awaited stop action,
 including when the thread is idle. Old queued-user messages and plugin
@@ -4343,7 +4345,10 @@ Source identity is bound to the executed admission/lifecycle/fixture
 artifacts, not supplied by a caller. A successful receipt is returned only
 after fixture disposal, child exit and owned artifact cleanup. Completion and
 verification calls belong to the calling plugin's invocation lifetime: caller
-cancellation and plugin disposal cancel their underlying work.
+cancellation and plugin disposal cancel their underlying work. Verification
+callers and plugin disposal continue awaiting its bounded native cleanup even
+after the generic five-second invocation-drain deadline; that deadline cannot
+release verification callers or finish disposing their generation early.
 
 Verification requires POSIX process-group ownership; Windows fails closed.
 The server invokes only its fixed driver over an ownership IPC channel and owns

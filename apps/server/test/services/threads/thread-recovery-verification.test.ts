@@ -172,7 +172,7 @@ describe("fixed native recovery safeguard service boundary", () => {
 
   it("bounds temporary artifact cleanup rather than accepting an unremoved root", async () => {
     vi.useFakeTimers();
-    native.rm.mockReturnValue(Promise.withResolvers<void>().promise);
+    native.rm.mockReturnValue(new Promise<void>(() => {}));
     const { child, spawned } = childProcess();
     const verification = verifyRecoverySafeguards();
     const rejection = expect(verification).rejects.toThrow("temporary artifact cleanup exceeded");
@@ -218,9 +218,11 @@ describe("fixed native recovery safeguard service boundary", () => {
   });
 
   it("does not settle cancellation until parent-owned temporary cleanup completes", async () => {
-    const cleanup = Promise.withResolvers<void>();
-    const cleanupStarted = Promise.withResolvers<void>();
-    native.rm.mockImplementation(() => { cleanupStarted.resolve(); return cleanup.promise; });
+    let resolveCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => { resolveCleanup = resolve; });
+    let resolveCleanupStarted!: () => void;
+    const cleanupStarted = new Promise<void>((resolve) => { resolveCleanupStarted = resolve; });
+    native.rm.mockImplementation(() => { resolveCleanupStarted(); return cleanup; });
     const { child, spawned } = childProcess();
     const controller = new AbortController();
     const verification = verifyRecoverySafeguards({ signal: controller.signal });
@@ -229,9 +231,9 @@ describe("fixed native recovery safeguard service boundary", () => {
     await spawned;
     controller.abort();
     child.emit("close", 1, null);
-    await cleanupStarted.promise;
+    await cleanupStarted;
     expect(settled).toBe(false);
-    cleanup.resolve();
+    resolveCleanup();
     await expect(verification).rejects.toMatchObject({ name: "AbortError" });
     await observed;
   });

@@ -31,6 +31,8 @@ function call(index: number, phase: string | null): WorkflowCallInspection {
     finishedAt: index + 1,
     environmentId: null,
     branchName: null,
+    provisionedEnvironment: false,
+    changedFiles: null,
     options: {
       selection: null,
       outputSchema: null,
@@ -56,6 +58,7 @@ function run(calls: WorkflowCallInspection[]): WorkflowRunInspection {
     projectId: "proj_test",
     originThreadId: "thr_origin",
     environmentId: "env_test",
+    launchBaseCommit: null,
     originProvider: "codex",
     originModel: "gpt-test",
     originReasoningLevel: "medium",

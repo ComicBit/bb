@@ -1,3 +1,4 @@
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getRunRequired, listCallsForRun, migrations } from "./data.js";
@@ -27,6 +28,8 @@ interface LaneSetupOptions {
   sendError?: string;
   continuationUncommitted?: string[];
   workerState?: Record<string, { status?: string; projectId?: string; environmentId?: string }>;
+  pendingEnvironment?: boolean;
+  unmanagedEnvironment?: boolean;
 }
 
 function setup(options: LaneSetupOptions = {}) {
@@ -36,6 +39,7 @@ function setup(options: LaneSetupOptions = {}) {
   const commits: string[] = [];
   const archivedEnvironments: string[] = [];
   const deletedEnvironments: string[] = [];
+  const consumers: Array<{ id: string; environmentId: string }> = [];
   const workspaces = new Map<string, WorkspaceState>([
     [
       "environment-origin",
@@ -81,6 +85,9 @@ function setup(options: LaneSetupOptions = {}) {
             status: state?.status ?? "idle",
           } as never;
         },
+        list: async ({ environmentId }: { environmentId?: string } = {}) =>
+          consumers.filter((thread) => thread.environmentId === environmentId) as never,
+        events: { list: async () => [] },
         output: async () => ({ output: "done" }),
         defaultExecutionOptions: async () => ({
           model: "gpt-test",
@@ -108,16 +115,18 @@ function setup(options: LaneSetupOptions = {}) {
               });
             }
           }
-          return { id, environmentId: workerEnvironments.get(id) } as never;
+          return { id, environmentId: options.pendingEnvironment ? null : workerEnvironments.get(id) } as never;
         },
         send: async ({ threadId }) => {
-          if (options.sendError) throw new Error(options.sendError);
+          if (threadId !== "origin" && options.sendError) {
+            throw new Error(options.sendError);
+          }
           const environmentId = workerEnvironments.get(threadId);
           const workspace = environmentId === undefined ? undefined : workspaces.get(environmentId);
           if (workspace && options.continuationUncommitted) {
             workspace.uncommittedFiles = options.continuationUncommitted;
           }
-          return { ok: true } as never;
+          return { ok: true, delivery: "sent" };
         },
         stop: async () => ({ ok: true }) as never,
         archive: async () => ({ ok: true }) as never,
@@ -232,6 +241,9 @@ function setup(options: LaneSetupOptions = {}) {
             path: "/workspace",
             branchName: workspaces.get(environmentId)?.branchName ?? null,
             baseBranch: "main",
+            managed: !options.unmanagedEnvironment,
+            isWorktree: environmentId !== "environment-origin",
+            workspaceProvisionType: "managed-worktree",
           }) as never,
         commit: async ({ environmentId }) => {
           commits.push(environmentId);
@@ -270,14 +282,15 @@ function setup(options: LaneSetupOptions = {}) {
     archivedEnvironments,
     deletedEnvironments,
     workspaces,
+    consumers,
     childCount: () => childCount,
-    async start(workflowSource: string, allowDirty = false) {
+    async start(workflowSource: string, allowDirty = false, resumedFromRunId: string | null = null) {
       return service.start({
         projectId: "project-test",
         originThreadId: "origin",
         source: workflowSource,
         args: null,
-        resumedFromRunId: null,
+        resumedFromRunId,
         allowDirty,
       });
     },
@@ -308,10 +321,11 @@ function setup(options: LaneSetupOptions = {}) {
         .callsTo("threads.spawn")
         .map(([input]) => input as Record<string, unknown>);
     },
-    sendCalls() {
+    workerSendCalls() {
       return harness.sdk
         .callsTo("threads.send")
-        .map(([input]) => input as Record<string, unknown>);
+        .map(([input]) => input as Record<string, unknown>)
+        .filter((input) => input.threadId !== "origin");
     },
   };
 }
@@ -436,6 +450,164 @@ describe("workflow lane placement", () => {
     });
   });
 
+  it("acquires managed-worktree ownership only after asynchronous provisioning resolves", async () => {
+    const test = setup({
+      pendingEnvironment: true,
+      workspaces: { "environment-lane-1": { uncommittedFiles: ["pending.ts"], changedFiles: 2 } },
+    });
+    harnesses.push(test.harness);
+    const run = await test.start(source(`
+      return await agent("build", { environment: { worktree: {} }, reportIdentity: true });`));
+    const finished = await test.runToCompletion(run.id);
+    expect(JSON.parse(finished.resultJson!)).toMatchObject({
+      environmentId: "environment-lane-1", changedFiles: 2,
+    });
+    expect(test.commits).toEqual(["environment-lane-1"]);
+    expect(listCallsForRun(test.db, run.id)[0]?.provisionedEnvironment).toBe(true);
+    expect((await test.service.teardown(run.id, { discardUncommitted: false })).destroyed)
+      .toEqual([{ environmentId: "environment-lane-1", branchName: "bb/lane-1" }]);
+  });
+
+  it("does not infer destructive ownership from provisioning intent alone", async () => {
+    const test = setup({
+      pendingEnvironment: true, unmanagedEnvironment: true,
+      workspaces: { "environment-lane-1": { uncommittedFiles: ["external.ts"] } },
+    });
+    harnesses.push(test.harness);
+    const run = await test.start(source(`
+      return await agent("build", { environment: { worktree: {} }, reportIdentity: true });`));
+    const finished = await test.runToCompletion(run.id);
+    expect(JSON.parse(finished.resultJson!).changedFiles).toBeNull();
+    expect(test.commits).toEqual([]);
+    expect(listCallsForRun(test.db, run.id)[0]?.provisionedEnvironment).toBe(false);
+    expect((await test.service.teardown(run.id, { discardUncommitted: true })).destroyed).toEqual([]);
+  });
+
+  it("preserves authoritative counts and worker identity across successive resumes without ownership", async () => {
+    const test = setup({ workspaces: { "environment-lane-1": { changedFiles: 3 } } });
+    harnesses.push(test.harness);
+    const script = source(`
+      return await agent("build", { environment: { worktree: {} }, reportIdentity: true });`);
+    const original = await test.start(script);
+    const finished = await test.runToCompletion(original.id);
+    const expected = JSON.parse(finished.resultJson!);
+    // Model a restart after the successful call was persisted but before the
+    // enclosing run settled. Same-run replay must preserve the same count too.
+    test.db.prepare("UPDATE workflow_runs SET status = 'running', result_json = NULL WHERE id = ?")
+      .run(original.id);
+    const restarted = await test.runToCompletion(original.id);
+    expect(JSON.parse(restarted.resultJson!)).toEqual(expected);
+    expect(listCallsForRun(test.db, original.id)[0]?.replaySource).toBe("same-run");
+    let previous = original.id;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const resumed = await test.start(script, false, previous);
+      const replayed = await test.runToCompletion(resumed.id);
+      expect(JSON.parse(replayed.resultJson!)).toEqual(expected);
+      expect(listCallsForRun(test.db, resumed.id)[0]).toMatchObject({
+        childThreadId: "child-1", changedFiles: 3, provisionedEnvironment: false,
+      });
+      expect((await test.service.teardown(resumed.id, { discardUncommitted: true })).destroyed).toEqual([]);
+      previous = resumed.id;
+    }
+    expect(test.spawnCalls()).toHaveLength(1);
+    const attempted = await test.start(source(`
+      const lane = await agent("build", { environment: { worktree: {} }, reportIdentity: true });
+      try { await agent("fix", { continue: lane.threadId }); return "incorrect"; }
+      catch (error) { return error.message; }`), false, previous);
+    const rejected = await test.runToCompletion(attempted.id);
+    expect(JSON.parse(rejected.resultJson!)).toContain("owned by this run");
+    expect(test.workerSendCalls()).toEqual([]);
+  });
+
+  it.each([false, true])("does not settle a queued continuation from old idle output (structured=%s)", async (structured) => {
+    const test = setup();
+    harnesses.push(test.harness);
+    let admitted = false;
+    let prompt = "";
+    test.harness.sdk.stub("threads.send", async (input: Parameters<BbPluginApi["sdk"]["threads"]["send"]>[0]) => {
+      if (input.threadId === "origin") return { ok: true, delivery: "sent" };
+      const inputText = input.input[0];
+      prompt = inputText?.type === "text" ? inputText.text : "";
+      return { ok: true, delivery: "queued", queuedMessage: { id: "held-continuation" } } as never;
+    });
+    test.harness.sdk.stub("threads.events.list", async ({ afterSeq }) =>
+      afterSeq !== undefined && admitted ? [{
+        seq: 2, type: "client/turn/requested",
+        data: { originPluginId: "workflows", input: [{ type: "text", text: prompt, mentions: [] }] },
+      }] as never : [],
+    );
+    test.harness.sdk.stub("threads.output", async () => ({
+      output: structured ? '"done"' : "done",
+    }));
+    const run = await test.start(source(`
+      const lane = await agent("build", { environment: { worktree: {} }, reportIdentity: true });
+      return await agent("continue queued work", {
+        continue: lane.threadId, ${structured ? 'outputSchema: { type: "string" },' : ""}
+      });`));
+    const completion = test.runToCompletion(run.id);
+    try {
+      await vi.waitFor(() => expect(test.workerSendCalls()).toHaveLength(1));
+      test.service.onThreadIdle("child-1", "done");
+      await vi.waitFor(() => expect(listCallsForRun(test.db, run.id)[1]?.status).toBe("running"));
+      expect(test.service.get(run.id)?.resultJson).toBeNull();
+      expect(test.workerSendCalls()).toHaveLength(1);
+      admitted = true;
+      test.harness.sdk.stub("threads.output", async () => ({
+        output: structured ? '"new result"' : "new result",
+      }));
+      test.service.onThreadIdle("child-1", "done");
+      const finished = await completion;
+      expect(JSON.parse(finished.resultJson!)).toBe("new result");
+      expect(test.workerSendCalls()).toHaveLength(1);
+    } finally {
+      admitted = true;
+      await completion;
+    }
+  });
+
+  it("awaits structured worker shutdown before postprocessing and sequential continuation", async () => {
+    const test = setup({
+      workspaces: { "environment-lane-1": { uncommittedFiles: ["unfinished.ts"] } },
+    });
+    harnesses.push(test.harness);
+    let stopping = false;
+    let stopped = false;
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+    test.harness.sdk.stub("threads.get", async ({ threadId }) => ({
+      id: threadId, projectId: "project-test", archivedAt: null, providerId: "codex",
+      environmentId: threadId === "origin" ? "environment-origin" : "environment-lane-1",
+      status: threadId === "origin" || stopped ? "idle" : "active",
+    }) as never);
+    test.harness.sdk.stub("threads.stop", async () => {
+      stopping = true;
+      await stopGate;
+      stopped = true;
+      return { ok: true };
+    });
+    const run = await test.start(source(`
+      const lane = await agent("build", {
+        environment: { worktree: {} }, reportIdentity: true, outputSchema: { type: "string" },
+      });
+      return await agent("fix", { continue: lane.threadId });`));
+    const completion = test.runToCompletion(run.id);
+    try {
+      await vi.waitFor(() => expect(listCallsForRun(test.db, run.id)[0]?.status).toBe("running"));
+      const submitted = test.service.submitStructuredResult("child-1", "built");
+      await vi.waitFor(() => expect(stopping).toBe(true));
+      expect(test.commits).toEqual([]);
+      expect(test.workerSendCalls()).toEqual([]);
+      releaseStop();
+      await expect(submitted).resolves.toEqual({ ok: true });
+      await completion;
+      expect(test.commits).toEqual(["environment-lane-1"]);
+      expect(test.workerSendCalls()).toHaveLength(1);
+    } finally {
+      releaseStop();
+      await completion;
+    }
+  });
+
   it("continues an existing worker instead of spawning a second one", async () => {
     const test = setup();
     harnesses.push(test.harness);
@@ -453,7 +625,7 @@ describe("workflow lane placement", () => {
     await test.runToCompletion(run.id);
 
     expect(test.spawnCalls()).toHaveLength(1);
-    expect(test.sendCalls()).toEqual([
+    expect(test.workerSendCalls()).toMatchObject([
       {
         threadId: "child-1",
         mode: "auto",
@@ -551,7 +723,7 @@ describe("workflow lane placement", () => {
       } catch (error) { return error.message; }`));
     const finished = await test.runToCompletion(run.id);
     expect(JSON.parse(finished.resultJson!)).toContain("Cannot continue worker");
-    expect(test.sendCalls()).toEqual([]);
+    expect(test.workerSendCalls()).toEqual([]);
   });
 
   it("never retries an ambiguously acknowledged continuation send", async () => {
@@ -561,8 +733,9 @@ describe("workflow lane placement", () => {
       const lane = await agent("build", { environment: { worktree: {} }, reportIdentity: true });
       try { await agent("fix", { continue: lane.threadId }); }
       catch (error) { return error.message; }`));
-    await test.runToCompletion(run.id);
-    expect(test.sendCalls()).toHaveLength(1);
+    const finished = await test.runToCompletion(run.id);
+    expect(JSON.parse(finished.resultJson!)).toBe("provider temporarily unavailable");
+    expect(test.workerSendCalls()).toHaveLength(1);
   });
 
   it("does not auto-commit a continued worker's dirty environment", async () => {
@@ -592,7 +765,7 @@ describe("workflow lane placement", () => {
     expect(JSON.parse(finished.resultJson!)).toEqual(expect.arrayContaining([
       expect.stringContaining("another call is using it"),
     ]));
-    expect(test.sendCalls()).toHaveLength(1);
+    expect(test.workerSendCalls()).toHaveLength(1);
   });
 
 });
@@ -698,6 +871,67 @@ describe("workflow lane teardown", () => {
       expect(test.commits).toEqual([]);
     },
   );
+
+  it("retains a lane borrowed by another active workflow even before its worker starts", async () => {
+    const test = setup();
+    harnesses.push(test.harness);
+    const owner = await test.start(source(`
+      return await agent("build", { environment: { worktree: {} } });`));
+    await test.runToCompletion(owner.id);
+    const borrower = await test.start(source(`return 1;`));
+    test.db.prepare("UPDATE workflow_runs SET environment_id = ? WHERE id = ?")
+      .run("environment-lane-1", borrower.id);
+    const report = await test.service.teardown(owner.id, { discardUncommitted: true });
+    expect(report.kept).toMatchObject([{ reason: "environment is used by another active workflow" }]);
+    expect(report.destroyed).toEqual([]);
+    expect(test.archivedEnvironments).toEqual([]);
+    expect(test.deletedEnvironments).toEqual([]);
+  });
+
+  it("retains a lane used by another workflow's active existing-environment call", async () => {
+    const test = setup();
+    harnesses.push(test.harness);
+    const owner = await test.start(source(`
+      return await agent("build", { environment: { worktree: {} } });`));
+    await test.runToCompletion(owner.id);
+    let borrowed = true;
+    test.harness.sdk.stub("threads.get", async ({ threadId }) => ({
+      id: threadId, projectId: "project-test", providerId: "codex", archivedAt: null,
+      environmentId: threadId === "origin" ? "environment-origin" : "environment-lane-1",
+      status: threadId === "child-2" && borrowed ? "active" : "idle",
+    }) as never);
+    const borrower = await test.start(source(`
+      return await agent("review", { environment: { environmentId: "environment-lane-1" } });`));
+    const completion = test.runToCompletion(borrower.id);
+    try {
+      await vi.waitFor(() => expect(listCallsForRun(test.db, borrower.id)[0]).toMatchObject({
+        status: "running", environmentId: "environment-lane-1",
+      }));
+      const report = await test.service.teardown(owner.id, { discardUncommitted: true });
+      expect(report.kept).toMatchObject([{ reason: "environment is used by another active workflow" }]);
+      expect(report.destroyed).toEqual([]);
+      expect(test.archivedEnvironments).toEqual([]);
+      expect(test.deletedEnvironments).toEqual([]);
+    } finally {
+      borrowed = false;
+      test.service.onThreadIdle("child-2", "reviewed");
+      await completion;
+    }
+  });
+
+  it("retains a clean lane while an external unarchived thread uses it", async () => {
+    const test = setup();
+    harnesses.push(test.harness);
+    const run = await test.start(source(`
+      return await agent("build", { environment: { worktree: {} } });`));
+    await test.runToCompletion(run.id);
+    test.consumers.push({ id: "external-worker", environmentId: "environment-lane-1" });
+    const report = await test.service.teardown(run.id, { discardUncommitted: true });
+    expect(report.kept).toMatchObject([{ reason: "environment has unarchived external consumers" }]);
+    expect(report.destroyed).toEqual([]);
+    expect(test.archivedEnvironments).toEqual([]);
+    expect(test.deletedEnvironments).toEqual([]);
+  });
 
   it("refuses to tear down a run that is still going", async () => {
     const test = setup();
