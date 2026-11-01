@@ -252,6 +252,8 @@ export class HostOnlineRpcUnavailableError extends Error {
 }
 
 export class NotificationHub implements DbNotifier {
+  private readonly threadRevisions = new Map<string, number>();
+  private nextThreadRevision = 0;
   private readonly clientKeysBySocket = new Map<
     HubSocket,
     Map<string, RealtimeSubscriptionTarget>
@@ -1037,11 +1039,27 @@ export class NotificationHub implements DbNotifier {
     return { promise, cancel };
   }
 
+  getThreadRevision(threadId: string): number {
+    const retained = this.threadRevisions.get(threadId);
+    if (retained !== undefined) return retained;
+    // Eviction must invalidate an old snapshot, not restore its previous token.
+    // A process-wide sequence gives every reintroduced entry a new revision.
+    const revision = ++this.nextThreadRevision;
+    this.threadRevisions.set(threadId, revision);
+    if (this.threadRevisions.size > 4096) {
+      const oldest = this.threadRevisions.keys().next().value;
+      if (oldest !== undefined) this.threadRevisions.delete(oldest);
+    }
+    return revision;
+  }
+
   notifyThread(
     threadId: string,
     changes: ThreadChangeKind[],
     metadata?: ThreadChangeMetadata,
   ): void {
+    this.threadRevisions.delete(threadId);
+    this.getThreadRevision(threadId);
     if (changes.includes("events-appended")) emitPluginThreadEvents(threadId);
     const message: ThreadChangedMessage = {
       type: "changed",

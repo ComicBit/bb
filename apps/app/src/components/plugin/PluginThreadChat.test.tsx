@@ -114,6 +114,30 @@ beforeEach(() => {
 });
 
 describe("PluginThreadChat", () => {
+  it("forwards controlled collapse to the shared native screen", async () => {
+    const { wrapper: Wrapper } = createQueryClientTestHarness();
+    const ThreadChat = pluginSdkAppImplementation.ThreadChat;
+    const onChange = vi.fn();
+    const { container } = render(
+      <Wrapper>
+        <MemoryRouter>
+          <ThreadChat
+            threadId="thr_demo"
+            experimental_historyCollapsed
+            experimental_onHistoryCollapsedChange={onChange}
+          />
+        </MemoryRouter>
+      </Wrapper>,
+    );
+    await waitFor(() => expect(screen.getByTestId("thread-screen")).toBeTruthy());
+    expect(mocks.threadScreenProps.at(-1)).toEqual(expect.objectContaining({
+      historyCollapsed: true,
+      onHistoryCollapsedChange: onChange,
+    }));
+    expect(container.firstElementChild?.classList.contains("h-full")).toBe(false);
+    expect(pluginSdkAppImplementation.experimental_supportsThreadChatHistoryCollapse()).toBe(true);
+  });
+
   it("gives a plugin page a working query client and sdk-backed thread context", async () => {
     const { wrapper: Wrapper } = createQueryClientTestHarness();
     render(
@@ -225,7 +249,12 @@ describe("PluginThreadChat", () => {
     render(
       <Wrapper>
         <MemoryRouter>
-          <ThreadChat threadId="thr_demo" variant="timeline" />
+          <ThreadChat
+            threadId="thr_demo"
+            variant="timeline"
+            experimental_historyCollapsed
+            experimental_onHistoryCollapsedChange={vi.fn()}
+          />
         </MemoryRouter>
       </Wrapper>,
     );
@@ -235,6 +264,8 @@ describe("PluginThreadChat", () => {
     );
     const props = mocks.threadScreenProps.at(-1)!;
     expect(props.composer).toBeNull();
+    expect(props.historyCollapsed).toBeUndefined();
+    expect(props.onHistoryCollapsedChange).toBeUndefined();
     expect(props.presentation).toEqual({
       kind: "transcript",
       layout: "contained",

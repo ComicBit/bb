@@ -3,6 +3,7 @@ import {
   useEffect,
   useId,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -17,6 +18,7 @@ import {
   type PromptMentionLinkResolver,
 } from "@bb/client-core";
 import { cn } from "@bb/shared-ui/lib/utils";
+import { Button } from "@bb/shared-ui/button";
 import { OverflowFade } from "@bb/shared-ui/overflow-fade";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
 import {
@@ -122,6 +124,9 @@ export interface ThreadScreenComposerHost {
 interface ThreadScreenProps {
   composer: ThreadScreenComposerHost | null;
   environment: Environment | null;
+  historyCollapsed?: boolean;
+  onHistoryCollapsedChange?: (collapsed: boolean) => void;
+  historyStatusError?: boolean;
   presentation: ThreadScreenPresentation;
   projectId: string;
   resolveMentionLink: PromptMentionLinkResolver;
@@ -149,6 +154,18 @@ function hasTimelineRowId(
         row.children !== null &&
         hasTimelineRowId(row.children, rowId)),
   );
+}
+
+function getLatestConversationSequence(rows: readonly TimelineRow[]): number {
+  let latest = 0;
+  for (const row of rows) {
+    if (row.kind === "conversation") {
+      latest = Math.max(latest, row.sourceSeqStart);
+    } else if (row.kind === "turn" && row.children !== null) {
+      latest = Math.max(latest, getLatestConversationSequence(row.children));
+    }
+  }
+  return latest;
 }
 
 function buildHostConnectionNotice(
@@ -446,6 +463,9 @@ function useComposerFocusRequestKey(
 export function ThreadScreen({
   composer,
   environment,
+  historyCollapsed,
+  onHistoryCollapsedChange,
+  historyStatusError = false,
   presentation,
   projectId,
   resolveMentionLink,
@@ -484,6 +504,48 @@ export function ThreadScreen({
     useState<string | null>(null);
   const { timelineLoading, timelineRows } = timeline;
   const isThreadTimelinePending = timelineLoading && timelineRows.length === 0;
+  const historyCollapseEnabled =
+    presentation.kind === "panel" && composer !== null &&
+    historyCollapsed !== undefined;
+  const isHistoryCollapsed = historyCollapseEnabled && historyCollapsed;
+  const expandHistory = useCallback(() => {
+    onHistoryCollapsedChange?.(false);
+  }, [onHistoryCollapsedChange]);
+  const historyObservationRef = useRef<{
+    threadId: string;
+    sequence: number;
+  } | null>(null);
+  const latestConversationSequence = useMemo(
+    () => historyCollapseEnabled ? getLatestConversationSequence(timelineRows) : 0,
+    [historyCollapseEnabled, timelineRows],
+  );
+  useEffect(() => {
+    if (!historyCollapseEnabled) {
+      historyObservationRef.current = null;
+      return;
+    }
+    if (timelineLoading || timeline.timelineError) return;
+    const previous = historyObservationRef.current;
+    historyObservationRef.current = {
+      threadId: thread.id,
+      sequence: latestConversationSequence,
+    };
+    if (
+      previous?.threadId === thread.id &&
+      latestConversationSequence > previous.sequence &&
+      isHistoryCollapsed
+    ) {
+      expandHistory();
+    }
+  }, [
+    expandHistory,
+    historyCollapseEnabled,
+    isHistoryCollapsed,
+    latestConversationSequence,
+    thread.id,
+    timeline.timelineError,
+    timelineLoading,
+  ]);
 
   const { handleEditSentMessage, inlineMessageEditor, sentMessageEdit } =
     useSentMessageEditing({
@@ -564,6 +626,8 @@ export function ThreadScreen({
       }
       isPrimaryComposer={presentation.kind === "page"}
       permissionPolicy={composer.permissionPolicy}
+      historyCollapseEnabled={historyCollapseEnabled}
+      onSubmitMessage={historyCollapseEnabled ? expandHistory : undefined}
       contextWindowUsage={timeline.contextWindowUsage}
       environmentCheckout={composer.environmentCheckout}
       environmentCompactLabel={chrome?.environmentCompactLabel}
@@ -601,6 +665,35 @@ export function ThreadScreen({
       contextEnvironmentId={composer.contextEnvironmentId}
       thread={thread}
     />
+  ) : null;
+  const historyError = !isHistoryCollapsed ? null
+    : pendingInteractionsQuery.isError ? "Couldn't check pending interactions."
+    : timeline.timelineError ? "Couldn't load conversation history."
+    : historyStatusError ? "Couldn't load thread status."
+    : thread.runtime.displayStatus === "error" ? "Thread execution failed."
+    : null;
+  const historyNotice = historyError ? (
+    <div
+      role="alert"
+      className="mb-2 flex items-center justify-between gap-3 text-sm text-destructive-text"
+    >
+      <span>{historyError}</span>
+      {pendingInteractionsQuery.isError ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={pendingInteractionsQuery.isFetching}
+          onClick={() => void pendingInteractionsQuery.refetch()}
+        >
+          Retry
+        </Button>
+      ) : (
+        <Button type="button" variant="outline" size="sm" onClick={expandHistory}>
+          Show conversation
+        </Button>
+      )}
+    </div>
   ) : null;
 
   switch (presentation.kind) {
@@ -645,6 +738,8 @@ export function ThreadScreen({
         <WithoutThreadContextCard>
           <ThreadScreenPanelShell
             presentation={presentation}
+            historyCollapsed={Boolean(isHistoryCollapsed)}
+            historyNotice={historyNotice}
             promptArea={promptArea}
             surface={surface}
             threadId={thread.id}
@@ -669,11 +764,15 @@ export function ThreadScreen({
 
 function ThreadScreenPanelShell({
   presentation,
+  historyCollapsed,
+  historyNotice,
   promptArea,
   surface,
   threadId,
 }: {
   presentation: Extract<ThreadScreenPresentation, { kind: "panel" }>;
+  historyCollapsed: boolean;
+  historyNotice: ReactNode;
   promptArea: ReactNode;
   surface: ReactNode;
   threadId: string;
@@ -684,7 +783,10 @@ function ThreadScreenPanelShell({
   const footer = (
     <div className={cn("relative", surfaceClassName)}>
       <OverflowFade placement="above" tone={tone} />
-      <div className="px-4 pb-4 pt-2">{promptArea}</div>
+      <div className="px-4 pb-4 pt-2">
+        {historyNotice}
+        {promptArea}
+      </div>
     </div>
   );
   if (layout === "document") {
@@ -696,10 +798,12 @@ function ThreadScreenPanelShell({
         className={cn("flex min-w-0 flex-col", surfaceClassName)}
       >
         <div
+          hidden={historyCollapsed}
           className={cn(
             "mx-auto flex w-full min-w-0 flex-col",
             measure === "page" ? "px-4 pb-3 pt-3" : "px-2 pb-3 pt-3",
             maxWidthClassName,
+            historyCollapsed && "hidden",
           )}
         >
           {surface}
@@ -712,7 +816,7 @@ function ThreadScreenPanelShell({
     <div
       data-thread-window=""
       data-surface-tone={tone}
-      className="flex min-h-0 flex-1 flex-col"
+      className={cn("flex min-h-0 flex-col", !historyCollapsed && "flex-1")}
     >
       <BottomAnchoredScrollBody
         key={threadId}
@@ -723,6 +827,7 @@ function ThreadScreenPanelShell({
         maxWidthClassName={maxWidthClassName}
         footer={footer}
         scrollAnchorThreadId={threadId}
+        historyCollapsed={historyCollapsed}
       >
         {surface}
       </BottomAnchoredScrollBody>

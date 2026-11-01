@@ -379,7 +379,7 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
   },
   {
     reason:
-      "Thread creation may omit root-thread presentation and execution fields so the server can resolve project/provider defaults.",
+      "Thread creation may omit presentation and execution fields for defaults; experimental_createOnly is an explicit opt-in to an empty pending conversation and omission retains required initial input.",
     fields: [
       "createThreadRequestSchema.sectionId",
       "createThreadRequestSchema.pinned",
@@ -393,6 +393,7 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
       "createThreadRequestSchema.sourceSeqEnd",
       "createThreadRequestSchema.sourceThreadId",
       "createThreadRequestSchema.title",
+      "createThreadRequestSchema.experimental_createOnly",
     ],
   },
   {
@@ -1634,6 +1635,45 @@ describe("server-contract canonical schemas", () => {
         },
       }),
     ).toThrow("input must contain at least one entry");
+  });
+
+  it("accepts explicitly create-only empty input without treating it as a fork", () => {
+    const request = createThreadRequestSchema.parse({
+      projectId: "proj_123",
+      providerId: "codex",
+      origin: "sdk",
+      input: [],
+      experimental_createOnly: true,
+      environment: { type: "reuse", environmentId: "env_123" },
+    });
+    expect(request.experimental_createOnly).toBe(true);
+    expect(request.input).toEqual([]);
+    expect(request.originKind).toBeNull();
+  });
+
+  it.each([
+    { input: [{ type: "text", text: "Do not discard input" }] },
+    { originKind: "fork", sourceThreadId: "thread_source" },
+    { sourceThreadId: "thread_source" },
+    { sourceSeqEnd: 10 },
+    { sendAt: 123456 },
+    { model: "gpt-5" },
+    { reasoningLevel: "medium" },
+    { serviceTier: "fast" },
+    { permissionMode: "full" },
+    { sessionOptions: { mode: "plan" } },
+    { pluginSubmission: { pluginId: "example", data: null } },
+    { executionInputSources: { model: "explicit" } },
+  ])("rejects create-only metadata that would be silently discarded: %j", (extra) => {
+    expect(() => createThreadRequestSchema.parse({
+      projectId: "proj_123",
+      providerId: "codex",
+      origin: "sdk",
+      input: [],
+      experimental_createOnly: true,
+      environment: { type: "reuse", environmentId: "env_123" },
+      ...extra,
+    })).toThrow("experimental_createOnly");
   });
 
   it("accepts empty input for an idle fork", () => {

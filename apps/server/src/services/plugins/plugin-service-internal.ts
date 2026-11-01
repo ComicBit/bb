@@ -3,6 +3,7 @@ import type { EnvironmentRemoval } from "@bb/domain";
 import type { MachineEnrollmentService } from "../machines/machine-services.js";
 import type { AiServiceRegistry } from "../ai/ai-service-registry.js";
 import type { DbConnection, HostRow } from "@bb/db";
+import type { ExperimentalRecovery } from "@get-bb/plugin-sdk";
 import type {
   DynamicTool,
   PendingInteraction,
@@ -85,6 +86,7 @@ export interface PluginServiceDeps {
   providerRegistry?: ProviderRegistryService;
   pluginHostArtifacts?: PluginHostArtifactRegistry;
   aiServices: AiServiceRegistry;
+  recovery?: ExperimentalRecovery;
   onSettingsChanged?: (pluginId: string) => void;
   onPluginsChanged?: () => void;
   /**

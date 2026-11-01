@@ -10,7 +10,7 @@ Start a thread, pick Codex, and let it write and review code in your repository 
 - Question cards for the questions Codex asks while it keeps working. Your answer reaches Codex as a message.
 - Codex skills from your home directory and project, listed next to bb skills.
 - Health, usage, and install status on each host, with an install or update action.
-- A Codex AI service for inference and voice that other bb features can use.
+- A Codex AI service for inference and voice that other bb features can use. Targeted inference keeps the requested host and model without model fallback, supports None or Medium reasoning and Default or Fast tier, and reports only provider-returned usage and actual tier. Helper inference retains model fallback when no model is selected; voice retains its 65-second timeout.
 
 ## Settings
 

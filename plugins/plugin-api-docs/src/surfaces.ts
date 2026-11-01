@@ -1220,11 +1220,24 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Follow queued messages, including ones cancelled before dispatch",
           "Get the provider's error and rate-limit windows when a turn fails",
           "Observe successful environment removal with its previous machine and path",
+          "Register handlers before one startup reconciliation because unloaded events are not replayed; avoid polling thread state to detect lifecycle changes",
+          "Subscribe when a thread receives a pending interaction",
+          "Observe debounced experimental_thread.events notifications with the latest sequence and current thread, or experimental_terminal.input without keystroke contents",
+          "Use experimental_recovery.snapshot for persisted run provenance, fresh-user and sticky Stop boundaries, final root-assistant evidence and an opaque native state revision; historical unknown provenance is not safe admission evidence",
+          "Admit only the fixed please continue through experimental_recovery.continue({ snapshot, admit }); native compare-and-append rechecks current state and synchronous plugin policy after async preparation, refuses hook waits without queueing, and only a later fresh user run rearms native Stop",
+          "Preserve eager optional experimental_recoverySnapshot identity from thread.active and thread.idle before deferred delivery, then obtain a fresh current-state snapshot before admission",
+          "Run experimental_recovery.verifySafeguards in an owned source-built native host: its fixed isolated process exercises native SQLite/admission/lifecycle safeguards and returns source/runtime-bound witnesses plus cleanup; no configurable commands, live user-runtime fixtures or caller truth flags",
+          "Use returned native lifecycle snapshots to exercise the consuming plugin's actual startup/no-catch-up, eager identity and deduplication tracker; native guard witnesses alone do not select or approve a detector",
         ],
         apiSymbols: [
           "PluginEvents",
           "PluginThreadEventPayloads",
           "PluginTurnFailedEvent",
+          "BbPluginApi.experimental_recovery",
+          "ExperimentalRecovery",
+          "ExperimentalRecoverySnapshot",
+          "ExperimentalRecoveryContinueResult",
+          "ExperimentalRecoverySafeguardsReceipt",
         ],
         firstParty: [
           "Automations",
@@ -1531,6 +1544,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Start plugin updates in the background and follow their progress or rollback",
           "Read Viewed state for up to 500 file paths; mark and clear return acknowledgements",
           "Retry failed environment cleanup with recover: true after inspecting processes using the workspace",
+          "Prepare one durable existing-bot conversation with sdk.threads.spawn({ input: [], experimental_createOnly: true, ... }); it stays pending without dispatch or provisioning until its first real message, and keeps an existing environment association immediately",
+          "Have sends, spawn and fork attributed to the actual calling plugin; caller-supplied sender identity or app/sdk origin cannot manufacture fresh-user recovery provenance",
         ],
         apiSymbols: [
           "BbPluginApi",
@@ -1552,6 +1567,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "PluginBbSdk.threads.experimental_listDescendants",
           "PluginBbSdk.threads.experimental_listCascade",
           "PluginBbSdk.threads.experimental_regenerateTitle",
+          "PluginBbSdk.threads.spawn",
+          "ThreadSpawnBaseArgs",
         ],
         firstParty: [
           "Account Pooler [Experimental]",
@@ -1633,14 +1650,26 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         summary:
           "Provide the models that write bb's titles, commit messages, and transcripts. With this, a plugin can:",
         bullets: [
+<<<<<<< HEAD
           "Write thread titles and commit messages with any model",
           "Transcribe voice input from the microphone button",
           "Appear as a choice in Settings → AI services",
+=======
+          "Write thread titles and commit messages with any model or API the plugin chooses",
+          "Transcribe voice input for the microphone button in the prompt box",
+          "Appear as a choice per task in Settings → AI services, with a status line that says how to make it ready",
+          "Participate in Automatic after bb cloud, ordered by plugin ID and service ID",
+          "Call bb.experimental_aiServices.complete on an explicit machine and exact model with medium reasoning and fast tier; missing or ambiguous services reject without fallback, and only provider-reported usage and actual tier are returned",
+>>>>>>> 897eacab (feat(plugin-sdk): preserve native orchestration capabilities)
         ],
         apiSymbols: [
           "PluginAiServices",
           "PluginAiServiceDeclaration",
           "PluginAiServiceStatus",
+          "PluginAiServices.complete",
+          "PluginAiCompleteOptions",
+          "ExperimentalAiCompletionInput",
+          "ExperimentalAiCompletionMetadata",
         ],
         firstParty: ["bb cloud AI", "Codex provider"],
         experimental: true,
@@ -1652,10 +1681,32 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         summary:
           "Use bb's own chat, prompt box, and pickers inside plugin pages. With this, a plugin can:",
         bullets: [
+<<<<<<< HEAD
           "Embed a thread, a new-thread prompt box, or a textarea with editable voice input",
           "Render Markdown, code, diffs, and file links, and copy text and save files, the way bb does",
           "Open app links with device approval, remember allowed apps, and revoke approvals in Settings",
           "Add or override app icons while matching bb's styling",
+=======
+          "Embed the thread view and the new-thread prompt box as components",
+          "Collapse ThreadChat history with experimental_historyCollapsed while retaining one native composer, draft, attachments, mentions, queue, permission controls, Stop and errors; apply experimental_onHistoryCollapsedChange expansion requests for submissions and new messages",
+          "Require the running host's experimental_supportsThreadChatHistoryCollapse() before using collapse; check that the getter exists on older hosts. It resolves late-installed runtimes, and upgrading the plugin SDK alone does not add host support",
+          "Seed experimental_NewThreadComposer or navigate.toCompose with initialPrompt containing @thread:<id>, @project:<id>, or @section:<id> to create mention pills with host-resolved labels; composer seeds preserve non-empty drafts",
+          "Render message text with the same Markdown renderer bb uses",
+          "Embed experimental_ProviderModelPicker and experimental_PermissionModePicker with the host's provider defaults, capabilities, and machine permission ceiling",
+          "Render supplied code and diffs with experimental_SourceCode and experimental_Diff, or use experimental_useCodeTheme to theme an embedded editor",
+          "Use UrlLink or useBbNavigate().openUrl for bb's browser preference; use experimental_FileLink for workspace, host, or thread-storage targets with optional line or range locations",
+          "Open the same live-file targets in bb's preview or the preferred external editor with experimental_openFilePreview and experimental_openFileExternally",
+          "Resolve document links and images beside a workspace or thread-storage file with Markdown.experimental_document",
+          "Inherit bb's styling, so embedded UI matches the rest of the app",
+          "Register inline React artwork with app.experimental_icons.register({ name, component }); namespacing is recommended, but any plugin can use any name",
+          "Add names or override built-in app icons; conflicts between plugins use the first plugin id in lexical order and warn, while duplicate names within one plugin reject setup",
+          "Render experimental_ProviderIcon with required providerKind (agent, machine, environment), provider={provider}, and optional fallback (Code by default). Pass an existing provider record: it reads id, logoUrl, icon, and strings.iconTint, resolving the matching kind/id slot override, then legacy unscoped overrides, then declared artwork. It fetches no metadata. Marks are decorative by default; pass aria-label for a meaningful standalone image",
+          "Provider icons update on plugin load/reload/unload; throwing or recursive overrides fall back to supplied artwork. Use the same component for agent, machine, and environment providers",
+          "Use the same icon names in experimental_Icon and host-rendered icon fields: registered React artwork wins over built-in names, followed by namespaced <pluginId>/<name> assets from bb.branding.experimental_icons. Missing names use the surface's fallback",
+          "Explicit resolved icons take precedence over bb.branding.icon for mentions, message actions, navigation panels, fixed tabs, panel launchers and their opened tabs, and legacy sidebar-footer actions; omitted or unknown names fall back to plugin branding, then Zap. Plugin identity in Tools and Settings keeps its branding. Composer menu items and draft-row status continue using their supplied icons",
+          "Return nothing from icon registration: bb replaces React artwork on reload and removes it on unload. Declared SVG icons need no app bundle and remain available while the plugin is stopped; React artwork receives className and should use currentColor",
+          "Load the same registrations in web, desktop, and mobile's web app; manage their plugin through bb plugin build, install, reload, and remove",
+>>>>>>> 897eacab (feat(plugin-sdk): preserve native orchestration capabilities)
         ],
         apiSymbols: [
           "experimental_getApplicationLinkApprovals",
@@ -1668,6 +1719,9 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "ExperimentalAppIcons",
           "PluginAppBuilder.experimental_icons",
           "ThreadChat",
+          "ThreadChatProps.experimental_historyCollapsed",
+          "ThreadChatProps.experimental_onHistoryCollapsedChange",
+          "experimental_supportsThreadChatHistoryCollapse",
           "Markdown",
           "MarkdownProps.experimental_document",
           "experimental_NewThreadComposer",

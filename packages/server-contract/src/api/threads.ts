@@ -139,6 +139,7 @@ export const createThreadRequestSchema = z
     visibility: threadVisibilitySchema.optional(),
     title: z.string().min(1).optional(),
     input: z.array(promptInputSchema),
+    experimental_createOnly: z.literal(true).optional(),
     model: z.string().min(1).optional(),
     serviceTier: serviceTierSchema.optional(),
     reasoningLevel: reasoningLevelSchema.optional(),
@@ -205,11 +206,36 @@ export const createThreadRequestSchema = z
         path: ["originPluginId"],
       });
     }
-    if (value.originKind === null && value.input.length === 0) {
+    if (
+      value.originKind === null &&
+      value.input.length === 0 &&
+      value.experimental_createOnly !== true
+    ) {
       ctx.addIssue({
         code: "custom",
         message: "input must contain at least one entry",
         path: ["input"],
+      });
+    }
+    if (
+      value.experimental_createOnly === true &&
+      (value.input.length > 0 ||
+        value.originKind !== null ||
+        value.sourceThreadId !== undefined ||
+        value.sourceSeqEnd !== undefined ||
+        value.sendAt !== undefined ||
+        value.pluginSubmission !== undefined ||
+        value.model !== undefined ||
+        value.reasoningLevel !== undefined ||
+        value.serviceTier !== undefined ||
+        value.sessionOptions !== undefined ||
+        value.permissionMode !== undefined ||
+        value.executionInputSources !== undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "experimental_createOnly requires empty input and no fork, scheduled message, submission or execution defaults; select execution on the first real message",
+        path: ["experimental_createOnly"],
       });
     }
     if (value.originKind === null && value.sourceSeqEnd !== undefined) {

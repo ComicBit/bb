@@ -5,6 +5,8 @@ import {
 } from "@bb/domain";
 import type { NormalizedPluginAiService } from "@get-bb/plugin-sdk/internal/host-policy";
 import { aiServiceAlreadyRegisteredMessage } from "@get-bb/plugin-sdk/internal/host-policy";
+import { z } from "zod";
+import type { ExperimentalAiCompletionInput, ExperimentalAiCompletionMetadata } from "@get-bb/plugin-sdk";
 
 const STATUS_TTL_MS = 10_000;
 const STATUS_TIMEOUT_MS = 2_000;
@@ -171,4 +173,68 @@ export function createAiServiceRegistry(
       return refresh(service);
     },
   };
+}
+
+const completionInputSchema = z.object({
+  hostId: z.string().min(1),
+  serviceId: z.string().min(1),
+  model: z.string().min(1),
+  reasoningEffort: z.enum(["none", "medium"]),
+  serviceTier: z.enum(["default", "fast"]).optional(),
+  prompt: z.string().min(1),
+  timeoutMs: z.number().int().positive(),
+  signal: z.instanceof(AbortSignal).optional(),
+}).strict();
+
+const completionMetadataSchema = z.object({
+  usage: z.object({
+    inputTokens: z.number().int().nonnegative().optional(),
+    outputTokens: z.number().int().nonnegative().optional(),
+    totalTokens: z.number().int().nonnegative().optional(),
+    cachedInputTokens: z.number().int().nonnegative().optional(),
+    cacheWriteInputTokens: z.number().int().nonnegative().optional(),
+    reasoningOutputTokens: z.number().int().nonnegative().optional(),
+  }).strict().optional(),
+  serviceTier: z.string().optional(),
+}).strict();
+
+export async function completeRegisteredAiService(
+  registry: AiServiceRegistry,
+  rawInput: ExperimentalAiCompletionInput,
+): Promise<{ text: string } & ExperimentalAiCompletionMetadata> {
+  const input = completionInputSchema.parse(rawInput);
+  const matches = registry.list().filter((service) => service.id === input.serviceId && service.complete !== null);
+  if (matches.length !== 1) throw new Error(matches.length === 0
+    ? `Inference service "${input.serviceId}" is not registered`
+    : `Inference service "${input.serviceId}" is ambiguous`);
+  const service = matches[0]!;
+  const signal = input.signal === undefined
+    ? AbortSignal.timeout(input.timeoutMs)
+    : AbortSignal.any([input.signal, AbortSignal.timeout(input.timeoutMs)]);
+  signal.throwIfAborted();
+  let metadata: ExperimentalAiCompletionMetadata = {};
+  let onAbort: (() => void) | undefined;
+  try {
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const text = await Promise.race([
+      service.complete!(input.prompt, {
+        signal,
+        experimental_hostId: input.hostId,
+        experimental_model: input.model,
+        experimental_reasoningEffort: input.reasoningEffort,
+        experimental_serviceTier: input.serviceTier,
+        experimental_timeoutMs: input.timeoutMs,
+        experimental_reportResult: (reported) => {
+          metadata = completionMetadataSchema.parse(reported);
+        },
+      }),
+      aborted,
+    ]);
+    return { text: z.string().parse(text), ...metadata };
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
 }

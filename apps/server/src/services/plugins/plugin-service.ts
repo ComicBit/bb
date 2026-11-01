@@ -1413,13 +1413,15 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       emitThreadActive(thread) {
         emitThreadEvent("thread.active", () => ({
           thread: buildThreadDto(thread),
-        }));
+          experimental_recoverySnapshot: deps.recovery?.snapshot({ threadId: thread.id }) ?? null,
+        }), "eager");
       },
       emitThreadIdle(thread) {
         emitThreadEvent("thread.idle", () => ({
           thread: buildThreadDto(thread),
           lastAssistantText: getLastThreadOutput(deps.db, thread.id),
-        }));
+          experimental_recoverySnapshot: deps.recovery?.snapshot({ threadId: thread.id }) ?? null,
+        }), "eager");
       },
       emitThreadFailed(thread) {
         emitThreadEvent("thread.failed", () => ({

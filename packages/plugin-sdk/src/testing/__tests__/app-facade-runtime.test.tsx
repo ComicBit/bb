@@ -6,6 +6,7 @@ import {
   experimental_Icon,
   experimental_usePluginId,
   experimental_useQuestionFormHost,
+  experimental_supportsThreadChatHistoryCollapse,
   useBbContext,
 } from "../../app.js";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "../app.js";
@@ -34,6 +35,17 @@ function ContextProbe() {
 }
 
 describe("@get-bb/plugin-sdk/app without a runtime at import time", () => {
+  it("resolves history-collapse support at call time, including old runtimes", () => {
+    host.__bbPluginRuntime = undefined;
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(false);
+    host.__bbPluginRuntime = { pluginSdkApp: {} };
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(false);
+    installTestPluginRuntime();
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(true);
+    host.__bbPluginRuntime = undefined;
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(false);
+  });
+
   it("loaded before any runtime was installed", () => {
     expect(runtimeAtImport).toBeUndefined();
   });

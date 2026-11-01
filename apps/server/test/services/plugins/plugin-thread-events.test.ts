@@ -1,4 +1,4 @@
-import { getLatestThreadSequence } from "@bb/db";
+import { getLatestThreadSequence, insertThreadPluginMetadata } from "@bb/db";
 import { emitPluginThreadEvents } from "../../../src/services/plugins/plugin-thread-events.js";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,13 +10,18 @@ import { beginProjectDeletion } from "../../../src/services/projects/project-del
 import { createThreadRecord } from "../../../src/services/threads/thread-create-helpers.js";
 import { archiveThreadAndReleaseChildren } from "../../../src/services/threads/thread-ownership.js";
 import type { ThreadCreateServiceRequest } from "../../../src/services/threads/thread-create-request.js";
+import { appendClientTurnEvent } from "../../../src/services/threads/thread-events.js";
+import type { ExperimentalRecoverySnapshot } from "@get-bb/plugin-sdk";
+import * as threadCommands from "../../../src/services/threads/thread-commands.js";
 import {
   seedEvent,
   seedThreadFixture,
+  seedThreadRuntimeState,
   seedTurnStarted,
   seedThread,
 } from "../../helpers/seed.js";
 import { createUserQuestionPayload } from "../../helpers/pending-interactions.js";
+import { textInput } from "../../helpers/prompt-input.js";
 import {
   createTestAppHarness,
   testLogger,
@@ -46,30 +51,38 @@ interface RecordedInteractionPayload extends RecordedThreadPayload {
 
 const globals = globalThis as Record<string, unknown>;
 
-async function setUpPluginHarness(serverSource: string): Promise<{
+async function setUpPluginHarness(
+  serverSource: string,
+  additionalPlugins: readonly { name: string; serverSource: string }[] = [],
+): Promise<{
   harness: TestAppHarness;
   cleanup(): Promise<void>;
 }> {
   const harness = await createTestAppHarness();
   const workDir = await mkdtemp(join(tmpdir(), "bb-plugin-events-"));
-  const rootDir = join(workDir, "bb-plugin-observer");
-  await mkdir(rootDir, { recursive: true });
-  await writeFile(
-    join(rootDir, "package.json"),
-    JSON.stringify({
-      name: "bb-plugin-observer",
-      version: "0.1.0",
-      bb: {
-        name: "Observer fixture",
-        description: "Thread events plugin fixture.",
-        branding: { icon: "Zap" },
-        server: "./server.ts",
-      },
-    }),
-  );
-  await writeFile(join(rootDir, "server.ts"), serverSource);
-  const entry = await harness.pluginService.installPath(rootDir);
-  expect(entry.status).toBe("running");
+  for (const plugin of [
+    { name: "bb-plugin-observer", serverSource },
+    ...additionalPlugins,
+  ]) {
+    const rootDir = join(workDir, plugin.name);
+    await mkdir(rootDir, { recursive: true });
+    await writeFile(
+      join(rootDir, "package.json"),
+      JSON.stringify({
+        name: plugin.name,
+        version: "0.1.0",
+        bb: {
+          name: "Observer fixture",
+          description: "Thread events plugin fixture.",
+          branding: { icon: "Zap" },
+          server: "./server.ts",
+        },
+      }),
+    );
+    await writeFile(join(rootDir, "server.ts"), plugin.serverSource);
+    const entry = await harness.pluginService.installPath(rootDir);
+    expect(entry.status).toBe("running");
+  }
   return {
     harness,
     async cleanup() {
@@ -90,6 +103,183 @@ function lifecycleDeps(harness: TestAppHarness) {
 }
 
 describe("plugin thread lifecycle events", () => {
+  it("captures active run identity before deferred delivery even when a newer run already exists", async () => {
+    const recorded: Array<{ experimental_recoverySnapshot: ExperimentalRecoverySnapshot | null }> = [];
+    globals.__eagerRecoveryEvents = recorded;
+    const { harness, cleanup } = await setUpPluginHarness(`
+      import type { BbPluginApi } from "@get-bb/plugin-sdk";
+      export default function plugin(bb: BbPluginApi) {
+        bb.events.on("thread.active", (payload) => {
+          const target: unknown = Reflect.get(globalThis, "__eagerRecoveryEvents");
+          if (!Array.isArray(target)) throw new Error("Missing eager recovery collector");
+          target.push(payload);
+        });
+      }
+    `);
+    try {
+      const { thread } = seedThreadFixture(harness, { thread: { status: "starting" } });
+      const append = () => appendClientTurnEvent(harness.deps, {
+        threadId: thread.id, environmentId: thread.environmentId,
+        type: "client/turn/requested", input: textInput("Fresh work"),
+        target: { kind: "new-turn" },
+        execution: { model: "gpt-5", reasoningLevel: "medium", permissionMode: "full", serviceTier: "default", source: "client/turn/requested" },
+        initiator: "user", provenance: "fresh-user", senderThreadId: null, originPluginId: null,
+        requestMethod: "turn/start", source: "tell",
+      });
+      const first = append();
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.started" } }).applied).toBe(true);
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.succeeded" } }).applied).toBe(true);
+      const newer = append();
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.started" } }).applied).toBe(true);
+      await vi.waitFor(() => expect(recorded).toHaveLength(2));
+      expect(recorded[0]?.experimental_recoverySnapshot?.run?.requestId).toBe(first.requestId);
+      expect(recorded[0]?.experimental_recoverySnapshot?.status).toBe("active");
+      expect(recorded[1]?.experimental_recoverySnapshot?.run?.requestId).toBe(newer.requestId);
+    } finally {
+      delete globals.__eagerRecoveryEvents;
+      await cleanup();
+    }
+  });
+
+  it("isolates nested eager recovery snapshots between handlers and plugins", async () => {
+    const { harness, cleanup } = await setUpPluginHarness(
+      `export default function plugin() {}`,
+      [{ name: "bb-plugin-second-observer", serverSource: `export default function plugin() {}` }],
+    );
+    const observed: ExperimentalRecoverySnapshot[] = [];
+    try {
+      const { thread } = seedThreadFixture(harness, { thread: { status: "starting" } });
+      insertThreadPluginMetadata(harness.db, {
+        threadId: thread.id,
+        pluginId: "observer",
+        metadata: { nested: { labels: ["original"] } },
+      });
+      const observer = harness.pluginService.getApi("observer")!;
+      observer.events.on("thread.active", (payload) => {
+        const snapshot = payload.experimental_recoverySnapshot;
+        if (!snapshot?.run) throw new Error("Missing eager recovery run");
+        snapshot.run.requestId = "forged-request";
+        snapshot.status = "idle";
+        const metadata = snapshot.pluginMetadata.observer as { nested: { labels: string[] } };
+        metadata.nested.labels[0] = "forged-metadata";
+        payload.experimental_recoverySnapshot = null;
+      });
+      observer.events.on("thread.active", (payload) => {
+        if (payload.experimental_recoverySnapshot) observed.push(payload.experimental_recoverySnapshot);
+      });
+      harness.pluginService.getApi("second-observer")!.events.on("thread.active", (payload) => {
+        if (payload.experimental_recoverySnapshot) observed.push(payload.experimental_recoverySnapshot);
+      });
+      const request = appendClientTurnEvent(harness.deps, {
+        threadId: thread.id, environmentId: thread.environmentId,
+        type: "client/turn/requested", source: "tell", requestMethod: "turn/start",
+        input: textInput("Fresh work"), target: { kind: "new-turn" },
+        execution: { model: "gpt-5", reasoningLevel: "medium", serviceTier: "default", permissionMode: "full", source: "client/turn/requested" },
+        initiator: "user", provenance: "fresh-user", senderThreadId: null, originPluginId: null,
+      });
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), {
+        threadId: thread.id, event: { type: "run.started" },
+      }).applied).toBe(true);
+      await vi.waitFor(() => expect(observed).toHaveLength(2));
+      for (const snapshot of observed) {
+        expect(snapshot.status).toBe("active");
+        expect(snapshot.run?.requestId).toBe(request.requestId);
+        expect(snapshot.pluginMetadata.observer).toEqual({ nested: { labels: ["original"] } });
+      }
+      expect(observed[0]).not.toBe(observed[1]);
+      expect(observed[0]?.run).not.toBe(observed[1]?.run);
+      expect(observed[0]?.pluginMetadata).not.toBe(observed[1]?.pluginMetadata);
+      expect(observer.experimental_recovery.snapshot({ threadId: thread.id })?.run?.requestId).toBe(request.requestId);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("does not deliver an eager event to a replacement plugin generation", async () => {
+    const { harness, cleanup } = await setUpPluginHarness(`export default function plugin() {}`);
+    try {
+      const { thread } = seedThreadFixture(harness, { thread: { status: "active" } });
+      const first = harness.pluginService.getApi("observer")!;
+      const oldHandler = vi.fn();
+      first.events.on("thread.active", oldHandler);
+      // Hold only event delivery; reload and factory lifecycle retain real timers.
+      let deliver: (() => void) | undefined;
+      const immediate = vi.spyOn(globalThis, "setImmediate").mockImplementationOnce((callback, ...args) => {
+        deliver = () => callback(...args);
+        return setImmediate(() => {});
+      });
+      harness.pluginService.events.emitThreadActive(thread);
+      immediate.mockRestore();
+      expect(deliver).toBeDefined();
+      await harness.pluginService.reload("observer");
+      const replacement = harness.pluginService.getApi("observer")!;
+      expect(replacement).not.toBe(first);
+      const newHandler = vi.fn();
+      replacement.events.on("thread.active", newHandler);
+      deliver!();
+      const delivered = Promise.withResolvers<void>();
+      setImmediate(delivered.resolve);
+      await delivered.promise;
+      expect(oldHandler).not.toHaveBeenCalled();
+      expect(newHandler).not.toHaveBeenCalled();
+      harness.pluginService.events.emitThreadActive(thread);
+      await vi.waitFor(() => expect(newHandler).toHaveBeenCalledOnce());
+    } finally {
+      vi.restoreAllMocks();
+      await cleanup();
+    }
+  });
+
+  it("rechecks disabled plugin state inside final native continuation admission", async () => {
+    const { harness, cleanup } = await setUpPluginHarness(`export default function plugin() {}`);
+    let release!: () => void;
+    let preparation: { mockRestore(): void } | undefined;
+    try {
+      const { thread, environment } = seedThreadFixture(harness, { thread: { status: "idle" } });
+      seedThreadRuntimeState(harness.deps, { threadId: thread.id, environmentId: environment.id, providerThreadId: "provider-recovery" });
+      const request = appendClientTurnEvent(harness.deps, {
+        threadId: thread.id, environmentId: environment.id,
+        type: "client/turn/requested", source: "tell", requestMethod: "turn/start",
+        input: textInput("Finish work"), target: { kind: "new-turn" },
+        execution: { model: "gpt-5", reasoningLevel: "medium", serviceTier: "default", permissionMode: "full", source: "client/turn/requested" },
+        initiator: "user", provenance: "fresh-user", senderThreadId: null, originPluginId: null,
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id, providerThreadId: "provider-recovery",
+        type: "turn/input/accepted", scope: turnScope(`turn-${request.sequence}`),
+        sequence: getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+        data: { clientRequestId: request.requestId },
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id, providerThreadId: "provider-recovery", type: "item/completed", scope: turnScope(`turn-${request.sequence}`),
+        sequence: getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+        data: { item: { type: "agentMessage", id: "assistant-recovery", text: "I will continue next." } },
+      });
+      const api = harness.pluginService.getApi("observer")!;
+      const snapshot = api.experimental_recovery.snapshot({ threadId: thread.id })!;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const original = threadCommands.prepareTurnSubmitCommandPayload;
+      preparation = vi.spyOn(threadCommands, "prepareTurnSubmitCommandPayload").mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        entered();
+        await gate;
+        return result;
+      });
+      const pending = api.experimental_recovery.continue({ snapshot, admit: () => true });
+      await ready;
+      await harness.pluginService.setEnabled("observer", false);
+      release();
+      expect(await pending).toEqual({ admitted: false, reason: "policy" });
+    } finally {
+      release?.();
+      preparation?.mockRestore();
+      await cleanup();
+    }
+  });
+
+
   it("delivers thread.active once when run.started enters active", async () => {
     const recorded: RecordedThreadPayload[] = [];
     globals.__activeEvents = recorded;

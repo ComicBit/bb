@@ -7,7 +7,8 @@ Host components:
   settings sections). This is the deliberate exception to the
   no-host-components rule: a stable product capability, not a UI kit. Props:
   `{ threadId, variant?, layout?, focusRequest?, permissionPolicy?,
-className?, leadingContent?, messageActions? }` —
+className?, leadingContent?, messageActions?, experimental_historyCollapsed?,
+experimental_onHistoryCollapsedChange? }` —
   `variant` is `"full"` (standard chat controls, default), `"compact"`
   (side-panel presentation), or `"timeline"` (transcript without a
   composer); `layout` is `"contained"` (fills and scrolls within the
@@ -18,6 +19,14 @@ className?, leadingContent?, messageActions? }` —
   a plugin surface can never widen permissions) or `"editable"` (the
   instance gets a live picker, letting the user set a mode for this thread
   independently of the one it was forked from);
+  `experimental_historyCollapsed` controls history visibility without remounting
+  the native history or composer. Omit it for existing behavior; timeline-only
+  variants ignore it. `experimental_onHistoryCollapsedChange(false)` requests
+  expansion on new conversation messages or submission; the plugin owns state.
+  Footer permissions, pending interactions, queue controls, Stop and errors stay
+  available. Call `experimental_supportsThreadChatHistoryCollapse()` from
+  `@get-bb/plugin-sdk/app` at use time to detect support, including when the
+  host runtime installs after the module loads.
   `leadingContent` is a `ReactNode` rendered above the conversation,
   scrolling with it; `messageActions` is a list of
   `ThreadChatMessageAction` entries `{ id, title, icon?, roles?, run }`

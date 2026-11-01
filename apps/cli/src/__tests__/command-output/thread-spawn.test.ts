@@ -57,6 +57,54 @@ describe("bb thread spawn command output", () => {
     });
   });
 
+  it("creates a pending empty thread without prompting for or uploading initial input", async () => {
+    const post = vi.fn(async ({ json }: { json: unknown }) => {
+      createThreadRequestSchema.parse(json);
+      return fixtures.makeThread({
+        id: "thread-create-only",
+        projectId: "proj-1",
+        providerId: "codex",
+        status: "pending",
+      });
+    });
+    stubServerApi({ "v1.threads.$post": post });
+    await runCommand(
+      ["thread", "spawn", "--project", "proj-1", "--create-only", "--title", "Persistent assistant"],
+      register,
+    );
+    expect(post).toHaveBeenCalledWith({
+      json: expect.objectContaining({
+        experimental_createOnly: true,
+        input: [],
+        title: "Persistent assistant",
+      }),
+    });
+    expect(collectLogLines(vi.mocked(console.log))).toContain(
+      "Thread created (pending): thread-create-only",
+    );
+  });
+
+  it.each([
+    ["--prompt", "Must not disappear"],
+    ["--file", "/tmp/attachment.txt"],
+    ["--plan"],
+    ["--send-at", "10m"],
+    ["--origin-kind", "fork"],
+    ["--model", "luna"],
+    ["--reasoning-level", "medium"],
+    ["--service-tier", "fast"],
+    ["--permission-mode", "auto"],
+    ["--option", "mode=plan"],
+  ])("rejects create-only input rather than silently discarding %s", async (...flags) => {
+    const post = vi.fn();
+    stubServerApi({ "v1.threads.$post": post });
+    await expect(runCommand(
+      ["thread", "spawn", "--project", "proj-1", "--create-only", ...flags],
+      register,
+    )).rejects.toThrow("process.exit:1");
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it("bb thread spawn --prompt-file sends shell-active text untouched", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bb-spawn-prompt-"));
     const path = join(dir, "prompt.md");
