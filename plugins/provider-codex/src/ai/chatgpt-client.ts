@@ -2,6 +2,7 @@ import type { JsonValue } from "@get-bb/plugin-sdk";
 import type { JsonObject } from "@get-bb/plugin-sdk/provider-bridge";
 import { fetchChatGpt, isCloudflareChallenge } from "./chatgpt-fetch.js";
 import type {
+  CodexAiCompleteResult,
   CodexAiCompleteInput,
   CodexAiFailureCode,
   CodexAiTranscribeInput,
@@ -18,6 +19,11 @@ import { AiServiceFailure } from "./failure.js";
 
 type InferenceCompleteCommand = CodexAiCompleteInput;
 type VoiceTranscribeCommand = CodexAiTranscribeInput;
+type InferenceCompleteResult = Omit<
+  Extract<CodexAiCompleteResult, { ok: true }>,
+  "ok"
+>;
+type InferenceMetadata = Pick<InferenceCompleteResult, "usage" | "serviceTier">;
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_TRANSCRIBE_URL = "https://chatgpt.com/backend-api/transcribe";
@@ -53,7 +59,7 @@ interface ReadLimitedResponseTextArgs {
   overflowBehavior: ReadOverflowBehavior;
 }
 
-interface ReadResponseTextFromSseArgs {
+interface ReadResponseFromSseArgs {
   deadline: CodexRequestDeadline;
   maxBytes: number;
   maxEventChars: number;
@@ -108,8 +114,9 @@ interface CodexResponsesRequest {
   model: string;
   instructions: string;
   reasoning: {
-    effort: "none";
+    effort: NonNullable<InferenceCompleteCommand["reasoningEffort"]>;
   };
+  service_tier?: "default" | "priority";
   store: boolean;
   stream: boolean;
   input: CodexInputMessage[];
@@ -125,7 +132,7 @@ interface CodexInputContent {
   text: string;
 }
 
-interface ResponseTextResult {
+interface ResponseTextResult extends InferenceMetadata {
   failure: CodexStreamFailure | null;
   text: string;
 }
@@ -488,6 +495,36 @@ function getCodexResponseText(response: JsonObject): string | null {
   return null;
 }
 
+function getCodexResponseMetadata(response: JsonObject): InferenceMetadata {
+  const metadata: InferenceMetadata = {};
+  const serviceTier = optionalString(response.service_tier);
+  if (serviceTier) metadata.serviceTier = serviceTier;
+  const rawUsage = response.usage ? toJsonObject(response.usage) : null;
+  if (!rawUsage) return metadata;
+  const inputDetails = rawUsage.input_tokens_details
+    ? toJsonObject(rawUsage.input_tokens_details)
+    : null;
+  const outputDetails = rawUsage.output_tokens_details
+    ? toJsonObject(rawUsage.output_tokens_details)
+    : null;
+  const usage: NonNullable<InferenceCompleteResult["usage"]> = {};
+  const fields: [keyof typeof usage, JsonValue | undefined][] = [
+    ["inputTokens", rawUsage.input_tokens],
+    ["outputTokens", rawUsage.output_tokens],
+    ["totalTokens", rawUsage.total_tokens],
+    ["cachedInputTokens", inputDetails?.cached_tokens],
+    ["cacheWriteInputTokens", inputDetails?.cache_write_tokens],
+    ["reasoningOutputTokens", outputDetails?.reasoning_tokens],
+  ];
+  for (const [key, value] of fields) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+      usage[key] = value;
+    }
+  }
+  if (Object.keys(usage).length > 0) metadata.usage = usage;
+  return metadata;
+}
+
 function getCodexFailure(response: JsonObject): CodexStreamFailure | null {
   const error = response.error ? toJsonObject(response.error) : null;
   if (!error) {
@@ -541,6 +578,7 @@ function extractTextFromSseEvent(event: JsonObject): ResponseTextResult {
     return {
       failure,
       text: text ?? "",
+      ...(response ? getCodexResponseMetadata(response) : {}),
     };
   }
 
@@ -562,10 +600,10 @@ function parseSseEventValue(eventData: string): JsonValue {
   }
 }
 
-async function readResponseTextFromSse(
+async function readResponseFromSse(
   response: Response,
-  args: ReadResponseTextFromSseArgs,
-): Promise<string> {
+  args: ReadResponseFromSseArgs,
+): Promise<InferenceCompleteResult> {
   if (!response.body) {
     throw new AiServiceFailure(
       "invalid_response",
@@ -579,6 +617,7 @@ async function readResponseTextFromSse(
   let buffer = "";
   let deltaText = "";
   let finalText: string | null = null;
+  let metadata: InferenceMetadata = {};
   let totalBytes = 0;
 
   try {
@@ -625,6 +664,17 @@ async function readResponseTextFromSse(
                 result.failure.message,
               );
             }
+            if (
+              optionalString(event.type) === "response.completed" ||
+              optionalString(event.type) === "response.done"
+            ) {
+              metadata = {
+                ...(result.usage === undefined ? {} : { usage: result.usage }),
+                ...(result.serviceTier === undefined
+                  ? {}
+                  : { serviceTier: result.serviceTier }),
+              };
+            }
             if (result.text) {
               if (
                 optionalString(event.type) === "response.completed" ||
@@ -654,7 +704,7 @@ async function readResponseTextFromSse(
       "Codex response did not include output text.",
     );
   }
-  return text;
+  return { text, ...metadata };
 }
 
 function buildCodexResponsesRequest(
@@ -664,7 +714,13 @@ function buildCodexResponsesRequest(
     model: command.model,
     instructions:
       "Follow the user prompt. Reply with only the requested text, without quotes or commentary.",
-    reasoning: { effort: "none" },
+    reasoning: { effort: command.reasoningEffort ?? "none" },
+    ...(command.serviceTier === undefined
+      ? {}
+      : {
+          service_tier:
+            command.serviceTier === "fast" ? "priority" : command.serviceTier,
+        }),
     store: false,
     stream: true,
     input: [
@@ -758,7 +814,7 @@ async function fetchResponses(args: ResponsesFetchArgs): Promise<Response> {
 export async function completeCodexInference(
   command: InferenceCompleteCommand,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<InferenceCompleteResult> {
   const deadline = createCodexRequestDeadline(command.timeoutMs, signal);
   const auth = await readCodexAuthCredentials();
   const request = buildCodexResponsesRequest(command);
@@ -772,7 +828,7 @@ export async function completeCodexInference(
     });
   }
 
-  return readResponseTextFromSse(response, {
+  return readResponseFromSse(response, {
     deadline,
     maxBytes: CODEX_SSE_RESPONSE_MAX_BYTES,
     maxEventChars: CODEX_SSE_EVENT_MAX_CHARS,

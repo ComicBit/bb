@@ -2,12 +2,17 @@ import {
   createFakePluginHost,
   type ExperimentalFakeHostRpcCall,
 } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { registerCodexAiService } from "./ai-service.js";
-import type { CodexAiTextResult } from "./ai/host-contract.js";
+import type {
+  CodexAiCompleteResult,
+  CodexAiTextResult,
+} from "./ai/host-contract.js";
 
 function setup(
-  answer: (call: ExperimentalFakeHostRpcCall) => CodexAiTextResult,
+  answer: (
+    call: ExperimentalFakeHostRpcCall,
+  ) => CodexAiCompleteResult | CodexAiTextResult,
 ) {
   const { bb, harness } = createFakePluginHost({
     sdk: { system: { config: async () => ({ primaryHostId: "host-1" }) } },
@@ -75,6 +80,88 @@ describe("Codex AI service", () => {
       codex.complete("Write a title", { signal: controller.signal }),
     ).rejects.toThrow("Overloaded");
     expect(codex.calls).toHaveLength(1);
+  });
+
+  it("forwards the explicit Cassidy host, Luna model, medium reasoning and fast tier without changing helper defaults", async () => {
+    const usage = {
+      inputTokens: 120,
+      outputTokens: 35,
+      totalTokens: 155,
+      cachedInputTokens: 40,
+      reasoningOutputTokens: 20,
+    };
+    const codex = setup(() => ({
+      ok: true,
+      text: '{"label":"needs_human"}',
+      usage,
+      serviceTier: "default",
+    }));
+    const reportResult = vi.fn();
+    const signal = new AbortController().signal;
+    await expect(
+      codex.complete("Classify a labelled synthetic case", {
+        signal,
+        experimental_hostId: "cassidy-host",
+        experimental_model: "gpt-6-luna",
+        experimental_reasoningEffort: "medium",
+        experimental_serviceTier: "fast",
+        experimental_timeoutMs: 30_000,
+        experimental_reportResult: reportResult,
+      }),
+    ).resolves.toBe('{"label":"needs_human"}');
+    expect(codex.calls).toEqual([
+      {
+        method: "codex.ai.complete",
+        hostId: "cassidy-host",
+        signal,
+        input: {
+          model: "gpt-6-luna",
+          prompt: "Classify a labelled synthetic case",
+          reasoningEffort: "medium",
+          serviceTier: "fast",
+          timeoutMs: 30_000,
+        },
+      },
+    ]);
+    expect(reportResult).toHaveBeenCalledExactlyOnceWith({
+      usage,
+      serviceTier: "default",
+    });
+  });
+
+  it("keeps missing usage and actual tier unknown even when fast is requested", async () => {
+    const codex = setup(() => ({ ok: true, text: '{"label":"observe"}' }));
+    const reportResult = vi.fn();
+    await expect(
+      codex.complete("Classify a labelled synthetic case", {
+        signal: new AbortController().signal,
+        experimental_model: "gpt-6-luna",
+        experimental_reasoningEffort: "medium",
+        experimental_serviceTier: "fast",
+        experimental_reportResult: reportResult,
+      }),
+    ).resolves.toBe('{"label":"observe"}');
+    expect(reportResult).toHaveBeenCalledExactlyOnceWith({});
+  });
+
+  it("does not substitute a fallback model or report success metadata for an explicit-model failure", async () => {
+    const codex = setup(() => ({
+      ok: false,
+      code: "rate_limited",
+      message: "Slow down",
+    }));
+    const reportResult = vi.fn();
+    await expect(
+      codex.complete("Classify a labelled synthetic case", {
+        signal: new AbortController().signal,
+        experimental_model: "gpt-6-luna",
+        experimental_reasoningEffort: "medium",
+        experimental_serviceTier: "fast",
+        experimental_reportResult: reportResult,
+      }),
+    ).rejects.toThrow("Slow down");
+    expect(codex.calls.map(modelOf)).toEqual(["gpt-6-luna"]);
+    expect(reportResult).not.toHaveBeenCalled();
   });
 
   it("refuses a recording over 20 MB before calling the host", async () => {

@@ -25,9 +25,34 @@ const textResultSchema = z.union([
 ]);
 export type CodexAiTextResult = z.infer<typeof textResultSchema>;
 
+export const codexAiCompleteResultSchema = z.union([
+  z
+    .object({
+      ok: z.literal(true),
+      text: z.string(),
+      usage: z
+        .object({
+          inputTokens: z.number().int().nonnegative().optional(),
+          outputTokens: z.number().int().nonnegative().optional(),
+          totalTokens: z.number().int().nonnegative().optional(),
+          cachedInputTokens: z.number().int().nonnegative().optional(),
+          cacheWriteInputTokens: z.number().int().nonnegative().optional(),
+          reasoningOutputTokens: z.number().int().nonnegative().optional(),
+        })
+        .strict()
+        .optional(),
+      serviceTier: z.string().min(1).optional(),
+    })
+    .strict(),
+  failureSchema,
+]);
+export type CodexAiCompleteResult = z.infer<typeof codexAiCompleteResultSchema>;
+
 export const codexAiCompleteInputSchema = z
   .object({
     model: z.string().min(1),
+    reasoningEffort: z.enum(["none", "medium"]).optional(),
+    serviceTier: z.enum(["default", "fast"]).optional(),
     prompt: z.string().min(1),
     timeoutMs: z.number().int().positive(),
   })
@@ -57,7 +82,7 @@ export type CodexAiStatus = z.infer<typeof codexAiStatusSchema>;
 export const codexAiHostContract = defineRpcContract({
   "codex.ai.complete": {
     input: codexAiCompleteInputSchema,
-    output: textResultSchema,
+    output: codexAiCompleteResultSchema,
   },
   "codex.ai.transcribe": {
     input: codexAiTranscribeInputSchema,

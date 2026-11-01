@@ -9,6 +9,10 @@ import {
   transcribeCodexVoice,
 } from "./chatgpt-client.js";
 import { resetChatGptCloudflareCookiesForTests } from "./chatgpt-fetch.js";
+import {
+  codexAiCompleteInputSchema,
+  codexAiCompleteResultSchema,
+} from "./host-contract.js";
 
 type FetchMock = ReturnType<typeof vi.fn<typeof fetch>>;
 
@@ -258,7 +262,7 @@ describe("Codex ChatGPT client", () => {
       new AbortController().signal,
     );
 
-    expect(result).toBe("Short title");
+    expect(result).toEqual({ text: "Short title" });
     const [, init] = requiredFetchCall(fetchMock, 0);
     const headers = headersFromInit(init);
     expect(headers.get("authorization")).toBe(`Bearer ${accessToken}`);
@@ -271,8 +275,12 @@ describe("Codex ChatGPT client", () => {
         "Follow the user prompt. Reply with only the requested text, without quotes or commentary.",
       reasoning: { effort: "none" },
       stream: true,
+      store: false,
     });
     expect(requestBody.text).toBeUndefined();
+    expect(requestBody.service_tier).toBeUndefined();
+    expect(requestBody.tools).toBeUndefined();
+    expect(requestBody.previous_response_id).toBeUndefined();
   });
 
   it("runs plain-text inference with Codex API key auth from ~/.codex/auth.json", async () => {
@@ -300,7 +308,7 @@ describe("Codex ChatGPT client", () => {
       new AbortController().signal,
     );
 
-    expect(result).toBe("OpenAI title");
+    expect(result).toEqual({ text: "OpenAI title" });
     const [url, init] = requiredFetchCall(fetchMock, 0);
     expect(url).toBe("https://api.openai.com/v1/responses");
     const headers = headersFromInit(init);
@@ -313,8 +321,205 @@ describe("Codex ChatGPT client", () => {
         "Follow the user prompt. Reply with only the requested text, without quotes or commentary.",
       reasoning: { effort: "none" },
       stream: true,
+      store: false,
     });
     expect(requestBody.text).toBeUndefined();
+    expect(requestBody.service_tier).toBeUndefined();
+    expect(requestBody.tools).toBeUndefined();
+    expect(requestBody.previous_response_id).toBeUndefined();
+  });
+
+  it.each(["chatgpt", "apikey"] as const)(
+    "requests gpt-6-luna medium fast stateless inference through %s",
+    async (authMode) => {
+      const homeDir = await makeTempHome();
+      if (authMode === "chatgpt") {
+        await writeCodexAuth({
+          homeDir,
+          accessToken: createAccessToken({
+            accountId: "account-shadow",
+            expSeconds: Math.floor(Date.now() / 1000) + 3600,
+          }),
+          refreshToken: "refresh-token",
+        });
+      } else {
+        await writeCodexApiKeyAuth({ homeDir, apiKey: "sk-test-shadow" });
+      }
+      const fetchMock = setupFetchMock();
+      fetchMock.mockResolvedValueOnce(
+        sseResponse([
+          {
+            type: "response.completed",
+            response: {
+              output: [
+                {
+                  type: "message",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: '{"label":"needs_human"}',
+                    },
+                  ],
+                },
+              ],
+              service_tier: "default",
+              usage: {
+                input_tokens: 120,
+                output_tokens: 35,
+                total_tokens: 155,
+                input_tokens_details: {
+                  cached_tokens: 40,
+                  cache_write_tokens: 10,
+                },
+                output_tokens_details: { reasoning_tokens: 20 },
+              },
+            },
+          },
+        ]),
+      );
+      const input = codexAiCompleteInputSchema.parse({
+        model: "gpt-6-luna",
+        reasoningEffort: "medium",
+        serviceTier: "fast",
+        prompt: 'Classify this labelled synthetic case. Return {"label": "..."}.',
+        timeoutMs: 10_000,
+      });
+      const result = await completeCodexInference(
+        input,
+        new AbortController().signal,
+      );
+      expect(codexAiCompleteResultSchema.parse({ ok: true, ...result })).toEqual({
+        ok: true,
+        text: '{"label":"needs_human"}',
+        serviceTier: "default",
+        usage: {
+          inputTokens: 120,
+          outputTokens: 35,
+          totalTokens: 155,
+          cachedInputTokens: 40,
+          cacheWriteInputTokens: 10,
+          reasoningOutputTokens: 20,
+        },
+      });
+      const [url, init] = requiredFetchCall(fetchMock, 0);
+      expect(url).toBe(
+        authMode === "chatgpt"
+          ? "https://chatgpt.com/backend-api/codex/responses"
+          : "https://api.openai.com/v1/responses",
+      );
+      const body = JSON.parse(textBodyFromInit(init));
+      expect(body).toMatchObject({
+        model: "gpt-6-luna",
+        reasoning: { effort: "medium" },
+        service_tier: "priority",
+        store: false,
+        stream: true,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: input.prompt }],
+          },
+        ],
+      });
+      expect(body.tools).toBeUndefined();
+      expect(body.previous_response_id).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["response.completed", "response.done"])(
+    "retains only reported valid usage fields from %s without terminal text",
+    async (type) => {
+      const homeDir = await makeTempHome();
+      await writeCodexApiKeyAuth({ homeDir, apiKey: "sk-test-shadow" });
+      const fetchMock = setupFetchMock();
+      fetchMock.mockResolvedValueOnce(
+        sseResponse([
+          {
+            type: "response.created",
+            response: { usage: { total_tokens: 999 }, service_tier: "priority" },
+          },
+          { type: "response.output_text.delta", delta: '{"label":"observe"}' },
+          {
+            type,
+            response: {
+              usage: {
+                input_tokens: 9,
+                output_tokens: "3",
+                total_tokens: null,
+                input_tokens_details: { cached_tokens: -1 },
+                output_tokens_details: { reasoning_tokens: 0 },
+              },
+            },
+          },
+        ]),
+      );
+      await expect(
+        completeCodexInference(
+          {
+            model: "gpt-6-luna",
+            reasoningEffort: "medium",
+            serviceTier: "fast",
+            prompt: "Classify the synthetic case",
+            timeoutMs: 10_000,
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({
+        text: '{"label":"observe"}',
+        usage: { inputTokens: 9, reasoningOutputTokens: 0 },
+      });
+    },
+  );
+
+  it.each<{ usage: null | Record<string, number> }>([{ usage: null }, { usage: {} }, { usage: { input_tokens: -1, output_tokens: 1.5 } }])(
+    "omits unavailable usage instead of fabricating token counts: %j",
+    async ({ usage }) => {
+      const homeDir = await makeTempHome();
+      await writeCodexApiKeyAuth({ homeDir, apiKey: "sk-test-shadow" });
+      const fetchMock = setupFetchMock();
+      fetchMock.mockResolvedValueOnce(
+        sseResponse([
+          { type: "response.output_text.delta", delta: "observe" },
+          { type: "response.completed", response: { usage, service_tier: null } },
+        ]),
+      );
+      await expect(
+        completeCodexInference(
+          {
+            model: "gpt-6-luna",
+            serviceTier: "default",
+            prompt: "Classify the synthetic case",
+            timeoutMs: 10_000,
+          },
+          new AbortController().signal,
+        ),
+      ).resolves.toEqual({ text: "observe" });
+      const [, init] = requiredFetchCall(fetchMock, 0);
+      expect(JSON.parse(textBodyFromInit(init))).toMatchObject({
+        reasoning: { effort: "none" },
+        service_tier: "default",
+      });
+    },
+  );
+
+  it("rejects unsupported inference settings and invalid reported usage at the host contract", () => {
+    const input = { model: "gpt-6-luna", prompt: "Classify", timeoutMs: 1000 };
+    expect(
+      codexAiCompleteInputSchema.safeParse({ ...input, reasoningEffort: "high" })
+        .success,
+    ).toBe(false);
+    expect(
+      codexAiCompleteInputSchema.safeParse({ ...input, serviceTier: "flex" })
+        .success,
+    ).toBe(false);
+    expect(
+      codexAiCompleteResultSchema.safeParse({
+        ok: true,
+        text: "observe",
+        usage: { inputTokens: -1 },
+      }).success,
+    ).toBe(false);
   });
 
   it("classifies streamed overload failures as service unavailable", async () => {
