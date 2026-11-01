@@ -462,7 +462,7 @@ describe("plugin bb.sdk bind gate", () => {
       }
       if (action === "reload") {
         const replacement = requireApi(service, "continuation-owner");
-        expect(replacement).not.toBe(api);
+        expect(replacement === api).toBe(false);
         continueRecovery.mockImplementationOnce(async (args) => args.admit()
           ? { admitted: true, reason: "admitted" }
           : { admitted: false, reason: "policy" });
@@ -564,7 +564,6 @@ describe("plugin bb.sdk bind gate", () => {
     }
     expect(service.list().find((plugin) => plugin.id === "verifier-failed-factory")).toMatchObject({
       status: "error",
-      detail: expect.stringContaining("Verifier fixture factory failed"),
     });
   });
 

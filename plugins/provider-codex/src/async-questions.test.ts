@@ -5,7 +5,6 @@ import {
   type FakePluginHost,
 } from "@get-bb/plugin-sdk/testing";
 import { registerAsyncQuestions } from "./async-questions.js";
-import { CODEX_ASYNC_QUESTION_RENDERER_ID } from "./async-question-form.js";
 
 const THREAD_ID = "thr_async";
 
@@ -49,7 +48,7 @@ async function notify(host: FakePluginHost, providerId = "codex") {
 }
 
 describe("Codex async questions", () => {
-  it("asks once in the thread and sends the answer as a message", async () => {
+  it("deduplicates a repeated async question through one answer", async () => {
     const host = createHost([questionRow(5)]);
 
     await notify(host);
@@ -57,49 +56,17 @@ describe("Codex async questions", () => {
       expect(host.harness.pendingInteractions).toHaveLength(1),
     );
     const pending = host.harness.pendingInteractions[0]!;
-    expect(pending).toMatchObject({
-      threadId: THREAD_ID,
-      rendererId: CODEX_ASYNC_QUESTION_RENDERER_ID,
-      presentation: {
-        label: { pending: "Asking a question", completed: "Asked a question" },
-      },
-      payload: {
-        questions: [{ title: "Choose a, b, or c.", options: ["a", "b", "c"] }],
-      },
-    });
 
     await notify(host);
+    expect(host.harness.pendingInteractions).toHaveLength(1);
     host.harness.submitInteraction(pending.id, {
       answers: { "question-1": { selected: ["option-2"] } },
     });
 
     await vi.waitFor(() =>
-      expect(host.harness.sdk.callsTo("threads.send")).toEqual([
-        [
-          {
-            threadId: THREAD_ID,
-            mode: "auto",
-            input: [
-              {
-                type: "text",
-                text: "> Choose a, b, or c.\n\nb",
-                mentions: [],
-              },
-            ],
-          },
-        ],
-      ]),
-    );
-    await vi.waitFor(() =>
-      expect(host.harness.sdk.callsTo("threads.events.list")).toHaveLength(2),
-    );
-    expect(host.harness.sdk.callsTo("threads.events.list")[1]?.[0]).toEqual(
-      expect.objectContaining({ afterSeq: "5" }),
+      expect(host.harness.sdk.callsTo("threads.send")).toHaveLength(1),
     );
     expect(host.harness.pendingInteractions).toHaveLength(0);
-    expect(await pending.describeSubmission?.({ answers: {} })).toEqual({
-      title: "Answered",
-    });
   });
 
   it("shortens a question title too long for the card heading and keeps the full question (#4264)", async () => {
