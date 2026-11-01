@@ -28,6 +28,19 @@ on Settings → Providers. Restore it with `bb provider enable acp-opencode`.
 This leaves other ACP agents and the host CLI intact. Disabled agents skip
 background capability probing. `bb provider list --all` includes disabled agents.
 
+The existing `acp-omp` harness supports CLI maintenance in Settings → Updates.
+Inspect with `bb updates status` or
+`bb machine provider-cli status <machine> --json`; install/update with
+`bb machine provider-cli install <machine> acp-omp`.
+The SDK equivalents are `hosts.providerCliStatus` and `hosts.installProviderCli`.
+Updates run `omp update` and verify the resulting version; the latest release
+comes from `omp update --check` on the configured channel.
+Offline checks report an unknown latest version rather than claiming current.
+Local-only installation probes never check the release server.
+This does not register another harness or change omp authentication, models,
+launch options, or Account Pooler contributions.
+
+
 Cursor project skills come from `.cursor/skills`, which can link to
 `.agents/skills`. BB lists these linked skills as read-only under `cursor-project`.
 

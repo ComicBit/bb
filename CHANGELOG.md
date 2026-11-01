@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add omp CLI maintenance to the existing ACP provider in Settings → Updates and `bb updates`, with channel-aware release checks and verified self-updates, without registering another harness.
+
 ## 0.48.0
 
 A quality and performance release: bb loads faster, sends far less over the wire, uses less CPU and memory on your machines, and fixes a long list of rough edges.

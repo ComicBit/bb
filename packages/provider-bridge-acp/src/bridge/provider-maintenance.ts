@@ -20,6 +20,7 @@ import {
 } from "@bb/provider-bridge-protocol/bridge-kit";
 import { z } from "zod";
 import { readOpenCodeGoUsage } from "./opencode-usage.js";
+import { getOmpInstallationRun, getOmpInstallationStatus } from "./omp-installation.js";
 
 const execFileAsync = execHostFile;
 const USAGE_FETCH_TIMEOUT_MS = 15_000;
@@ -224,7 +225,10 @@ export async function getAcpProviderHealth(args: {
 export async function getAcpProviderInstallationStatus(args: {
   maintenance: AcpMaintenanceDialect | undefined;
   command: string | null;
+  dialectId?: string;
+  checkUpdates?: boolean;
 }): Promise<ProviderInstallationStatus> {
+  if (args.dialectId === "omp") return getOmpInstallationStatus(args);
   const executableName = args.command ?? "";
   const resolvedExecutable =
     args.command === null ? null : await resolveExecutablePath(args.command);
@@ -260,8 +264,10 @@ export async function getAcpProviderInstallationStatus(args: {
 export async function getAcpProviderInstallationRun(args: {
   maintenance: AcpMaintenanceDialect | undefined;
   command: string | null;
+  dialectId?: string;
   action: "install" | "update";
 }): Promise<ProviderInstallationRunResult> {
+  if (args.dialectId === "omp") return getOmpInstallationRun(args);
   const status = await getAcpProviderInstallationStatus(args);
   return buildAcpProviderInstallationRun(status, args);
 }

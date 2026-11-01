@@ -3908,9 +3908,10 @@ async function handleRequest(
     case "provider/installation/status":
       sendResult(
         request.id,
-        await getAcpProviderInstallationStatus(
-          maintenanceTarget(request.params.providerOptions),
-        ),
+        await getAcpProviderInstallationStatus({
+          ...maintenanceTarget(request.params.providerOptions),
+          checkUpdates: request.params.checkUpdates,
+        }),
       );
       return;
 
