@@ -190,6 +190,28 @@ work and close streams, workers, and subprocesses before removing their files or
 tearing down their environment. Worker isolation does not restore built-in
 process objects or cancel resources that a test leaves running.
 
+## ACP Compaction Context Usage
+
+The context indicator, `bb thread context`, and the SDK use structured context
+usage events, not the token counts displayed in assistant messages. OMP can
+complete `/compact` and report its new count without sending an ACP
+`usage_update`. BB's OMP dialect recognizes the native
+`Compaction complete. Tokens: <before> -> <after> (saved <saved>).` report and
+publishes the post-compaction count before closing the compaction turn. The
+existing model capacity is retained; pre-compaction category details are not
+reused.
+
+A valid `usage_update` received during compaction takes precedence over this
+OMP-specific fallback. Failed, interrupted, or skipped compactions do not
+produce a fallback count. Other ACP dialects use their structured usage feed;
+BB does not interpret their messages as OMP reports. If OMP changes the report
+format or supplies no usable count, this fallback cannot refresh usage.
+
+Verify in an isolated source dev instance with an OMP thread: note its context
+count, run `/compact`, and compare the indicator and `bb thread context` with
+the reported post-compaction count before sending another prompt. Reload the
+thread to check that the updated count persists.
+
 ## ACP Steer Cancellation Failures
 
 ACP steering cancels the active prompt before submitting the follow-up. If that

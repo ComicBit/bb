@@ -3849,6 +3849,72 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).not.toContain("echo:/compact");
   });
 
+  it.each([
+    {
+      name: "OMP's reported post-compaction count",
+      dialectId: "omp",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: false,
+      expected: 26_590,
+    },
+    {
+      name: "structured usage in preference to OMP's prose",
+      dialectId: "omp",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: true,
+      expected: 24_000,
+    },
+    {
+      name: "generic ACP structured usage",
+      dialectId: "generic",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: true,
+      expected: 24_000,
+    },
+    {
+      name: "generic ACP without interpreting OMP's prose",
+      dialectId: "generic",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: false,
+      expected: null,
+    },
+    {
+      name: "OMP without a usable count",
+      dialectId: "omp",
+      message: "Compaction complete.",
+      structured: false,
+      expected: null,
+    },
+  ])(
+    "refreshes compaction usage from $name",
+    async ({ dialectId, message, structured, expected }) => {
+      const { providerThreadId } = await startThread({
+        dialectId,
+        envVars: {
+          FAKE_ACP_COMPACT_AGENT_MESSAGE: message,
+          FAKE_ACP_COMPACT_USAGE: structured ? "1" : "0",
+        },
+      });
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: compactCommandInput(),
+        }),
+      );
+      expect(await waitForTurnCompleted()).toMatchObject({
+        status: "completed",
+      });
+      const updates = threadEventsOfType("thread/contextWindowUsage/updated");
+      if (expected === null) {
+        expect(updates).toEqual([]);
+      } else {
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({
+          contextWindowUsage: { usedTokens: expected, estimated: false },
+        });
+      }
+    },
+  );
+
   it("fails the compaction turn legibly when the agent rejects the request", async () => {
     const { providerThreadId } = await startThread({
       envVars: { FAKE_ACP_PROMPT_ERROR: "1" },
