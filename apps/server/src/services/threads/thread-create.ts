@@ -1,7 +1,7 @@
 import { requestThreadStorageDeletion } from "./thread-lifecycle.js";
 import { seedThreadSessionOptionSelections } from "./thread-session-options.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
-import { markThreadDeleted, getEnvironment, getThread } from "@bb/db";
+import { markThreadDeleted, getEnvironment, getThread, setThreadExecutionOverride } from "@bb/db";
 import {
   describeSessionOptionConflict,
   modelSessionOptionConflict,
@@ -461,6 +461,7 @@ async function createPendingThreadAndAttemptFirstDispatch(
       selections: args.request.sessionOptions ?? {},
     });
     if (
+      args.request.experimental_createOnly !== true &&
       args.fork !== null &&
       args.fork.historyEndSequence !== null &&
       args.request.visibility === "visible"
@@ -481,6 +482,16 @@ async function createPendingThreadAndAttemptFirstDispatch(
       args.request,
       executionPlanArgs,
     );
+    if (args.request.experimental_createOnly === true) {
+      // No accepted turn exists yet to remember these preferences. Preserve the
+      // resolved model on the inert row so its first ordinary send can start.
+      setThreadExecutionOverride(deps.db, {
+        threadId: thread.id,
+        modelOverride: execution.model,
+        reasoningLevelOverride: execution.reasoningLevel,
+      });
+      return getThreadSafe(deps, thread.id);
+    }
     await attemptDispatch(deps, {
       thread,
       payload: {

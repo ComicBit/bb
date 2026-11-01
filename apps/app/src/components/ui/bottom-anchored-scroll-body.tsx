@@ -46,6 +46,7 @@ interface BottomAnchoredScrollBodyProps {
   contentClassName?: string;
   maxWidthClassName: string;
   scrollAnchorThreadId?: string;
+  historyCollapsed?: boolean;
 }
 
 interface ScrollElementIntoViewArgs {
@@ -102,6 +103,7 @@ export function BottomAnchoredScrollBody({
   contentInsetEndPx,
   children,
   scrollAnchorThreadId,
+  historyCollapsed = false,
 }: BottomAnchoredScrollBodyProps) {
   const store = useStore();
   const isPointerCoarse = usePointerCoarse();
@@ -328,7 +330,12 @@ export function BottomAnchoredScrollBody({
   return (
     <BottomAnchorContext.Provider value={bottomAnchorContextValue}>
       <TimelineScrollRestoreContext.Provider value={initialRestore}>
-        <div className="relative grid min-h-0 flex-1 grid-rows-[minmax(auto,1fr)] overflow-hidden">
+        <div
+          className={cn(
+            "relative grid min-h-0 grid-rows-[minmax(auto,1fr)] overflow-hidden",
+            !historyCollapsed && "flex-1",
+          )}
+        >
           <TitleBarScrollFade tone="background" />
           <div
             ref={scrollAreaRef}
@@ -340,7 +347,7 @@ export function BottomAnchoredScrollBody({
           >
             <div
               ref={scrollContentRef}
-              className="flex min-h-full min-w-0 flex-col"
+              className={cn("flex min-w-0 flex-col", !historyCollapsed && "min-h-full")}
               style={
                 contentInsetEndPx ? { paddingInlineEnd: contentInsetEndPx } : undefined
               }
@@ -352,11 +359,13 @@ export function BottomAnchoredScrollBody({
               />
               <div
                 ref={pageContentRef}
+                hidden={historyCollapsed}
                 data-scroll-attached={isAtBottom ? "" : undefined}
                 className={cn(
                   "mx-auto flex w-full min-w-0 flex-1 flex-col px-4 pb-4 pt-2",
                   maxWidthClassName,
                   contentClassName,
+                  historyCollapsed && "hidden",
                 )}
                 style={PAGE_SHELL_CONTENT_STYLE}
               >

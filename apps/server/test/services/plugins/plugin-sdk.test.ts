@@ -13,7 +13,7 @@ import {
 import { createMigratedConnection } from "@bb/db/testing";
 import { PERSONAL_PROJECT_ID } from "@bb/domain";
 import type { Logger } from "@bb/logger";
-import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
+import { createAiServiceRegistry, type AiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginServiceDeps,
@@ -33,7 +33,11 @@ import {
 } from "../../helpers/commands.js";
 import { PluginHostArtifactRegistry } from "../../../src/services/plugins/plugin-host-artifact-registry.js";
 import { startTestServer, testLogger } from "../../helpers/test-app.js";
-import { defineRpcContract } from "@get-bb/plugin-sdk";
+import {
+  defineRpcContract,
+  type ExperimentalRecoverySafeguardsReceipt,
+  type PluginAiCompleteOptions,
+} from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
 
@@ -111,6 +115,12 @@ describe("plugin bb.sdk bind gate", () => {
   let service: PluginService;
   let pluginHostArtifacts: PluginHostArtifactRegistry;
   let appUrl: string | null;
+  let aiServices: AiServiceRegistry;
+  const verifySafeguards = vi.fn(
+    async (_args?: { signal?: AbortSignal }): Promise<ExperimentalRecoverySafeguardsReceipt> => {
+      throw new Error("No safeguard verifier configured for this test");
+    },
+  );
   const sharedPorts = {
     declareSharedPorts: vi.fn(),
     validateSharedPortDeclaration: vi.fn(
@@ -200,8 +210,15 @@ describe("plugin bb.sdk bind gate", () => {
     disposePluginHost.mockClear();
     appUrl = "https://bb.example.test";
     pluginHostArtifacts = new PluginHostArtifactRegistry();
+    aiServices = createAiServiceRegistry();
+    verifySafeguards.mockClear();
     service = createPluginService({
-      aiServices: createAiServiceRegistry(),
+      aiServices,
+      recovery: {
+        snapshot: () => null,
+        continue: async () => ({ admitted: false, reason: "policy" }),
+        verifySafeguards,
+      },
       telemetry: createNoopTelemetryService(),
       db,
       pluginHostArtifacts,
@@ -296,7 +313,7 @@ describe("plugin bb.sdk bind gate", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("preserves no-context spawn and fork attribution", async () => {
+  it("forces the calling plugin identity for no-context spawn and fork attribution", async () => {
     const rootDir = await writePlugin(workDir, {
       name: "bb-plugin-metadata-attribution",
       serverSource: `export default function plugin() {}`,
@@ -346,14 +363,175 @@ describe("plugin bb.sdk bind gate", () => {
       });
       expect(requests[1]).toMatchObject({
         origin: "plugin",
-        originPluginId: "legacy-plugin",
+        originPluginId: "metadata-attribution",
       });
 
       await operation({ origin: "sdk" });
-      expect(requests[2]).toMatchObject({ origin: "sdk" });
-      expect(requests[2]).not.toHaveProperty("originPluginId");
+      expect(requests[2]).toMatchObject({
+        origin: "plugin",
+        originPluginId: "metadata-attribution",
+      });
     }
   });
+
+  it("uses the current thread-send transport and overwrites forged plugin attribution", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-send-owner",
+      serverSource: `export default function plugin() {}`,
+    });
+    await service.installPath(rootDir);
+    service.bindSdk({ baseUrl: "https://bb.example.test" });
+    const api = requireApi(service, "send-owner");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await api.sdk.threads.send({
+      threadId: "thread-1",
+      input: [{ type: "text", text: "continue", mentions: [] }],
+      originPluginId: "forged-plugin",
+    } as never);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toContain("https://bb.example.test/");
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      originPluginId: "send-owner",
+    });
+    expect(JSON.parse(String(init?.body))).not.toHaveProperty("pluginSubmission");
+  });
+
+  it.each(["disable", "reload"] as const)(
+    "cancels owned safeguard verification on %s and awaits its cleanup",
+    async (action) => {
+      const rootDir = await writePlugin(workDir, {
+        name: "bb-plugin-verifier-owner",
+        serverSource: `export default function plugin() {}`,
+      });
+      await service.installPath(rootDir);
+      const api = requireApi(service, "verifier-owner");
+      let signal: AbortSignal | undefined;
+      const { promise: cleanup, resolve: release } = Promise.withResolvers<void>();
+      verifySafeguards.mockImplementationOnce(async (args) => {
+        signal = args?.signal;
+        if (!signal) throw new Error("Missing verifier cancellation signal");
+        const aborted = Promise.withResolvers<void>();
+        signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+        await aborted.promise;
+        await cleanup;
+        signal.throwIfAborted();
+        throw new Error("Verifier must not return after cancellation");
+      });
+      const caller = new AbortController();
+      const pending = api.experimental_recovery.verifySafeguards({ signal: caller.signal }).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(signal).toBeDefined());
+      let disposed = false;
+      const disposal = (action === "disable"
+        ? service.setEnabled("verifier-owner", false)
+        : service.reload("verifier-owner")).then(() => { disposed = true; });
+      try {
+        await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+        expect(caller.signal.aborted).toBe(false);
+        expect(disposed).toBe(false);
+        await expect(api.experimental_recovery.verifySafeguards()).rejects.toThrow(/stale API handle/u);
+        expect(verifySafeguards).toHaveBeenCalledOnce();
+      } finally {
+        release();
+        await disposal;
+      }
+      expect(await pending).toBeInstanceOf(Error);
+      expect(disposed).toBe(true);
+    },
+  );
+
+  it("preserves caller cancellation for owned safeguard verification", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-verifier-caller",
+      serverSource: `export default function plugin() {}`,
+    });
+    await service.installPath(rootDir);
+    const api = requireApi(service, "verifier-caller");
+    let signal: AbortSignal | undefined;
+    verifySafeguards.mockImplementationOnce(async (args) => {
+      signal = args?.signal;
+      if (!signal) throw new Error("Missing verifier cancellation signal");
+      const aborted = Promise.withResolvers<void>();
+      signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+      await aborted.promise;
+      signal.throwIfAborted();
+      throw new Error("Verifier must not return after cancellation");
+    });
+    const caller = new AbortController();
+    const pending = api.experimental_recovery.verifySafeguards({ signal: caller.signal }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    const reason = new Error("Verifier caller disconnected");
+    caller.abort(reason);
+    expect(await pending).toBe(reason);
+    expect(signal?.aborted).toBe(true);
+    expect(service.getApi("verifier-caller")).toBe(api);
+  });
+
+  it.each(["disable", "reload", "caller cancellation"] as const)(
+    "cancels targeted AI completion on %s without changing its target",
+    async (action) => {
+      const rootDir = await writePlugin(workDir, {
+        name: "bb-plugin-ai-owner",
+        serverSource: `export default function plugin() {}`,
+      });
+      await service.installPath(rootDir);
+      const complete = vi.fn(async (_prompt: string, options: PluginAiCompleteOptions) => {
+        const aborted = Promise.withResolvers<void>();
+        options.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+        await aborted.promise;
+        options.signal.throwIfAborted();
+        return "Must not return after cancellation";
+      });
+      aiServices.register({
+        id: "exact-service",
+        displayName: "Exact service",
+        pluginId: "provider-plugin",
+        builtin: false,
+        complete,
+        transcribe: null,
+        status: null,
+      });
+      const api = requireApi(service, "ai-owner");
+      const caller = new AbortController();
+      const input = {
+        hostId: "exact-host",
+        serviceId: "exact-service",
+        model: "exact-model",
+        reasoningEffort: "medium" as const,
+        serviceTier: "fast" as const,
+        prompt: "Classify this exact request",
+        timeoutMs: 30_000,
+        signal: caller.signal,
+      };
+      const pending = api.experimental_aiServices.complete(input).catch((error: unknown) => error);
+      await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+      expect(complete.mock.calls[0]?.[0]).toBe(input.prompt);
+      const options = complete.mock.calls[0]?.[1];
+      expect(options).toMatchObject({
+        experimental_hostId: input.hostId,
+        experimental_model: input.model,
+        experimental_reasoningEffort: input.reasoningEffort,
+        experimental_serviceTier: input.serviceTier,
+        experimental_timeoutMs: input.timeoutMs,
+      });
+      if (action === "caller cancellation") {
+        caller.abort(new Error("AI caller disconnected"));
+      } else {
+        await (action === "disable"
+          ? service.setEnabled("ai-owner", false)
+          : service.reload("ai-owner"));
+      }
+      expect(options?.signal.aborted).toBe(true);
+      expect(caller.signal.aborted).toBe(action === "caller cancellation");
+      expect(await pending).toBeInstanceOf(Error);
+      expect(complete).toHaveBeenCalledOnce();
+    },
+  );
 
   it("serves the current public app URL without the SDK bind gate", async () => {
     const rootDir = await writePlugin(workDir, {

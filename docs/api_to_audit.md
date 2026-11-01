@@ -2500,6 +2500,22 @@ never falls through to another service.
 
 Docs: `backend-cli-agents.md`, [provider-plugin-api.md](provider-plugin-api.md) §7.
 
+`bb.experimental_aiServices.complete({ hostId, serviceId, model, reasoningEffort,
+serviceTier?, prompt, timeoutMs, signal? })` calls one uniquely registered
+completion service, rejecting missing or ambiguous service ids rather than
+falling back. The owning registration receives the explicit experimental host,
+model, reasoning, tier and timeout options through `PluginAiCompleteOptions`.
+It still returns plain text; consumers parse and validate structured text
+themselves. `experimental_reportResult` carries optional provider-reported usage
+and actual service tier. Missing counters or tier remain unknown, and no cost
+or token totals are estimated.
+
+Codex's existing `codex.ai.complete` is stateless (`store: false`, no tools,
+session or previous response). Medium reasoning and fast service are supported
+preferences; fast requests HTTP `service_tier: "priority"`, which need not equal
+the actual tier returned by the provider. Omitted options preserve the existing
+title/commit behavior. An explicit model never falls back to another model.
+
 **Audit before stabilizing.**
 
 1. **Structured input.** Confirm a bare prompt string stays enough, or whether
@@ -2516,6 +2532,11 @@ Docs: `backend-cli-agents.md`, [provider-plugin-api.md](provider-plugin-api.md) 
    this order and automatic inclusion should become user-editable settings.
 5. **Several services per plugin.** Confirm the id-per-registration shape and
    the per-plugin id scope (plugin id plus service id).
+6. **Explicit completion.** Verify selected host and exact model routing, reject
+   ambiguous service ids, preserve helper-task defaults, enforce cancellation
+   and timeout, and retain only actually reported partial/missing usage and
+   tier. Validate medium/fast transport against the provider rather than
+   assuming requested priority was delivered.
 
 ## `PluginFileOpenerSource.experimental_hostId` (`@get-bb/plugin-sdk/app`)
 
@@ -4189,3 +4210,158 @@ precedence, bounded discovery failure, and module-ABI preservation after Node
 replacement. Settle the shared process-local instance lifecycle across SDK
 bundle versions and whether `bundledNpmCli` belongs on the public surface before
 removing the prefix.
+## `ThreadChat` experimental history collapse (`@get-bb/plugin-sdk/app`)
+
+`ThreadChatProps.experimental_historyCollapsed` hides only native history,
+retaining its mounted timeline and the same composer identity, draft, caret,
+attachments, mentions, queued-input editor and execution state. The native
+footer remains accessible; opted-in chats retain permission/plugin interaction
+forms, queue actions and Stop even when an interaction blocks submission.
+Runtime/query errors remain visible with a route back to the conversation.
+The timeline-only variant ignores these props, and omission preserves the
+existing presentation.
+
+`experimental_onHistoryCollapsedChange(false)` requests in-place expansion
+for native submission and a newly observed conversation message. The caller
+owns the value and must apply the request. Existing history on initial load
+does not expand; streaming updates to the same message do not repeatedly
+override an operator's collapse.
+
+Check `typeof experimental_supportsThreadChatHistoryCollapse === "function" &&
+experimental_supportsThreadChatHistoryCollapse()` before using the props.
+The getter resolves the installed runtime when called, not at module import.
+Older hosts lack the capability; a newer plugin SDK alone cannot
+upgrade the host. Keep one ThreadChat with unchanged thread identity, variant
+and layout through scenery/page-header changes; do not clip private DOM,
+extract the footer or mount a replacement composer.
+
+Before stabilization, verify contained/document layouts, keyboard and
+accessibility hiding, draft/caret/focus/attachment/mention preservation, native
+permission and plugin interaction forms, queue editing, Stop, query/runtime
+errors, streaming/new-message expansion, and desktop/mobile reduced-motion
+behavior in a source-built app. Deterministic DOM coverage is not rendered
+or live-provider proof.
+
+## Create-only conversations (`CreateThreadRequest.experimental_createOnly`)
+
+`sdk.threads.spawn({ ..., input: [], experimental_createOnly: true })` and
+`bb thread spawn --project ID --create-only` create a durable empty pending
+conversation, not a fork and not a provider run. Placement resolves normally:
+an existing environment is associated immediately, and the selected startup
+context remains available for the first real message. No initial turn, queued
+input, provider dispatch or provisioning is admitted by creation.
+
+The flag requires empty input and rejects forks, source-thread/sequence
+references, scheduling, execution defaults and composer submission metadata
+instead of discarding them. Select model/reasoning/tier/permission on the first
+real message, not on empty creation. Ordinary creation still requires initial
+input. The first native composer/SDK/CLI message starts that same pending
+conversation through normal dispatch admission; create-only does not grant
+startup or permission bypass.
+
+Before stabilization, verify persistent identity across server restart,
+existing and not-yet-provisioned environment placement, first native send and
+its permission/queue policy, no silent input loss, and exact remembered
+execution-default semantics. The public HTTP request is additive; it does not
+change daemon startup command fields.
+
+## Source-bound recovery admission (`bb.experimental_recovery`)
+
+`snapshot({ threadId })` returns an `ExperimentalRecoverySnapshot` or `null`.
+It reads persisted native run request identity and provenance
+(`fresh-user`, `queued-user`, `plugin`, `agent`, `system` or historical
+`unknown`), latest fresh-user request identity/sequence, sticky native Stop
+revision/request, final root assistant message identity/event revision/text,
+host connectivity, thread ancestry/visibility/tombstones, safety counts and
+plugin metadata with its readable-state marker. `revision` is an opaque CAS
+token, not a timestamp or plugin-generated proof of safety. Native notification
+revisions retain at most 4096 thread entries; eviction invalidates outstanding
+snapshots rather than reusing a prior token.
+
+`continue({ snapshot, admit })` returns `{ admitted, reason }`, where `reason`
+is `admitted`, `changed`, `unsafe` or `policy`. It can submit only the native
+fixed text `please continue`. Ordinary `message.dispatch` hooks still apply:
+wait or rejection refuses this continuation without queuing it. After async
+preparation, native state must match the snapshot, plugin enabled/live state
+must still allow it, and the synchronous caller policy/paused callback must
+approve inside the final input append transaction. It is not a general
+arbitrary-input send or a queue bypass.
+
+Native Stop persists its marker before the first awaited stop action,
+including when the thread is idle. Old queued-user messages and plugin
+continuations cannot rearm it; only a later fresh user-origin request can.
+The Stop marker survives history suffix editing. Bound plugin SDK sends stamp
+the actual `originPluginId`; spawn/fork pin `origin: "plugin"` and
+the actual plugin ID even if a caller requests `app`/`sdk` attribution. A plugin
+cannot manufacture fresh-user provenance by setting sender identity or origin.
+
+`thread.active` and `thread.idle` may include an eager optional
+`experimental_recoverySnapshot`: identity is captured at native emission,
+before deferred plugin delivery, and each handler receives an isolated copy.
+Unloading/replacing a plugin cannot deliver old captured events into the new
+instance. Consumers preserve that event identity for fast active-to-idle runs,
+then obtain a current snapshot for admission; event snapshots are not
+current-state permission tokens.
+
+Before stabilization, audit provenance coverage and historical fail-closed
+handling, eager fast active-to-idle delivery, async race/ABA/Stop behavior,
+queued messages, pending interactions, background tasks, host connectivity,
+tombstones, caller paused/policy changes and ordinary hook wait/rejection.
+Review plugin ownership and snapshot privacy before widening access.
+Source-built app/server and updated Codex provider/host daemon are required.
+This port preserves current host/server protocol 258; a combined native release
+must retain its newer protocol, never the preservation branch's obsolete 228.
+The new experimental surfaces require an SDK release containing these exports:
+the next release after 0.6.109 (at least 0.6.110), plus a matching supported BB app
+release. SDK 0.6.104 from installed BB 0.48.1 and existing 0.6.109 do not provide
+these newly introduced capabilities. A package version alone cannot update a
+running native host; capability detection is required before using UI props.
+No installed-bundle modification or duplicate built-in provider install is supported.
+
+## Isolated source-built recovery verifier
+
+`bb.experimental_recovery.verifySafeguards({ signal? })` runs a fixed
+native-owned subprocess fixture driver. It accepts no executable path,
+fixture mutation, client-supplied proof or success flags. This facility
+requires the owned native source/build and its installed fixture runner;
+an old packaged host or missing source runner is a precise prerequisite,
+not permission to return synthetic success.
+
+The child owns temporary/in-memory SQLite, native services and notification
+hub, scripted provider transport and lifecycle fixtures. Its module globals
+are isolated: it must never borrow the live server's plugin hooks, database,
+daemon, profiles or user conversations. The fixed scenarios exercise Stop,
+fresh-user rearm, queued/plugin non-rearm, duplicate admission, startup
+observation, eager run identity, source-revision races, synchronous paused
+policy, role/visibility/parent changes, archive/delete, queued input,
+interactions/background work and disconnected hosts.
+
+`ExperimentalRecoverySafeguardsReceipt` contains native source identity,
+runtime version, completion timestamp, `{ id, passed, witness }` checks,
+`{ passed, witness }` cleanup, and actual persisted lifecycle snapshots.
+Source identity is bound to the executed admission/lifecycle/fixture
+artifacts, not supplied by a caller. A successful receipt is returned only
+after fixture disposal, child exit and owned artifact cleanup. Completion and
+verification calls belong to the calling plugin's invocation lifetime: caller
+cancellation and plugin disposal cancel their underlying work.
+
+Verification requires POSIX process-group ownership; Windows fails closed.
+The server invokes only its fixed driver over an ownership IPC channel and owns
+the temporary root. Its fixed 300-second deadline or cancellation terminates
+the exact owned process group, escalating TERM to KILL after three seconds,
+with a further three-second pipe-drain bound and three-second artifact-cleanup
+bound. The fixture keeps its 240-second deadline. No receipt is issued after
+cancellation, termination or cleanup failure. Direct, unowned driver invocation
+is refused rather than starting an unowned detached fixture tree.
+
+Native witnesses do not replace a consuming plugin's own state-machine
+proof: consumers must exercise their real startup/no-catch-up, eager ending
+identity and deduplication tracker with these native snapshot groups before
+enabling recovery, and must separately verify detector/shadow comparison
+and operator policy. Do not treat a native fixture flag as a selected-model
+judgment or as proof that unrelated plugin logic was executed.
+
+Before stabilization, audit fixed-path resolution, source/build identity,
+fixture transport isolation, abort/timeout cleanup, missing-source behavior
+and subprocess output validation. Run the facility in an owned source-built
+dev client/server; do not restart or retarget a user's installed main server.

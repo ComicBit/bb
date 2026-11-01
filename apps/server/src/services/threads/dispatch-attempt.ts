@@ -607,6 +607,16 @@ async function runDispatchAttempt(
         respectManualStopPause,
         startContext: args.startContext ?? retryStartContext,
         thread,
+        provenance:
+          args.retryOf !== undefined
+            ? "system"
+            : args.origin === "plugin" || args.originPluginId !== null
+              ? "plugin"
+              : author.initiator !== "user"
+                ? author.initiator
+                : args.source.kind === "drain"
+                  ? "queued-user"
+                  : "fresh-user",
       });
       if (admitted.value === null) {
         const current = getThread(deps.db, thread.id);
@@ -705,6 +715,16 @@ async function runDispatchAttempt(
       thread,
       trigger: args.trigger,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
+      provenance:
+        args.retryOf !== undefined
+          ? "system"
+          : args.origin === "plugin" || args.originPluginId !== null
+            ? "plugin"
+            : author.initiator !== "user"
+              ? author.initiator
+              : args.source.kind === "drain"
+                ? "queued-user"
+                : "fresh-user",
       beforeAppendInTransaction: ({ tx }) => {
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
@@ -790,6 +810,7 @@ interface AdmitPendingThreadArgs {
   originPluginId: string | null;
   payload: SendMessageRequest & { inputGroups?: PromptInput[][] };
   respectManualStopPause: boolean;
+  provenance: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   /** Creation's own record; null on a re-attempt, which reads it back. */
   startContext: PendingThreadStartContext | null;
   thread: Thread;
@@ -876,6 +897,7 @@ async function admitPendingThread(
           thread: starting,
           environmentIntent: startContext.environmentIntent,
           execution,
+          provenance: args.provenance,
           fork: startContext.fork,
           input: args.payload.input,
           originPluginId: args.originPluginId,

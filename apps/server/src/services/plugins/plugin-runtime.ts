@@ -13,6 +13,7 @@ import {
 import { logPluginBuildWarnings } from "./plugin-log.js";
 import type { MachineEnrollmentService } from "../machines/machine-services.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { completeRegisteredAiService } from "../ai/ai-service-registry.js";
 import {
   providerWithoutBridgeMessage,
   type NormalizedPluginProviderDeclaration,
@@ -1003,12 +1004,6 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   /**
-   * Fire-and-forget dispatch: the lifecycle seam returns immediately; the
-   * payload is assembled and handlers run on the next macrotask, after the
-   * transition (and any surrounding transaction) has settled. Handlers are
-   * looked up live at dispatch time, so a plugin disposed in between
-   * receives nothing.
-   *
    * A builder may return null for "on second look there is nothing to
    * announce" — a `turn.failed` on a thread that never dispatched a turn, say.
    * The builder runs only when a handler is listening, so that second look
@@ -1017,12 +1012,28 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   function emitThreadEvent<E extends PluginThreadEventName>(
     event: E,
     buildPayload: () => PluginThreadEventPayloads[E] | null,
+    delivery: "deferred" | "eager" = "deferred",
   ): void {
     if (!hasThreadEventHandlers(event)) return;
+    const recipients = [...loaded.values()].map((plugin) => ({
+      plugin,
+      handlers: [...plugin.handle.threadEventHandlers[event]],
+    }));
+    let eagerPayload: PluginThreadEventPayloads[E] | null = null;
+    if (delivery === "eager") {
+      try {
+        eagerPayload = structuredClone(buildPayload());
+      } catch (error) {
+        logger.warn(
+          `failed to build ${event} plugin event payload: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return;
+      }
+    }
     setImmediate(() => {
       let payload: PluginThreadEventPayloads[E] | null;
       try {
-        payload = buildPayload();
+        payload = delivery === "eager" ? eagerPayload : buildPayload();
       } catch (error) {
         logger.warn(
           `failed to build ${event} plugin event payload: ${error instanceof Error ? error.message : String(error)}`,
@@ -1030,9 +1041,14 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         return;
       }
       if (payload === null) return;
-      const delivered = payload;
-      for (const plugin of loaded.values()) {
-        for (const handler of [...plugin.handle.threadEventHandlers[event]]) {
+      for (const { plugin, handlers } of recipients) {
+        // Queued events belong to the generation listening at emission, never
+        // a replacement loaded before deferred delivery.
+        if (loaded.get(plugin.pluginId) !== plugin || plugin.stopping.signal.aborted) continue;
+        for (const handler of handlers) {
+          // Native recovery state is captured eagerly and must not be mutable
+          // across observers, including two handlers registered by one plugin.
+          const delivered = delivery === "eager" ? structuredClone(payload) : payload;
           void invokeWrapped(plugin, `${event} handler`, () =>
             handler(delivered),
           );
@@ -1757,6 +1773,15 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       db: deps.db,
       dataDir: deps.dataDir,
       getSdk: () => boundSdk,
+      recovery: deps.recovery,
+      completeAi: (input) => completeRegisteredAiService(deps.aiServices, input),
+      runOwnedOperation: async (label, run, callerSignal) => {
+        if (stopping.signal.aborted) throw new PluginContextStaleError(row.id);
+        callerSignal?.throwIfAborted();
+        const outcome = await invokeWrapped(plugin, label, run, callerSignal);
+        if (!outcome.ok) throw outcome.cause ?? new Error(outcome.error);
+        return outcome.value;
+      },
       getMachineEnrollments: () => {
         if (!context.machineEnrollments)
           throw new Error(

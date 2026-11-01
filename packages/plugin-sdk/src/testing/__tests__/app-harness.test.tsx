@@ -30,6 +30,7 @@ const {
   experimental_useAppPanel,
   experimental_useFixedTabTarget,
   ThreadChat,
+  experimental_supportsThreadChatHistoryCollapse,
   useBbNavigate,
   useComposer,
   useComposers,
@@ -1505,6 +1506,7 @@ describe("loadPluginApp", () => {
   });
 
   it("renders the ThreadChat stub with recorded props inside a slot", () => {
+    expect(experimental_supportsThreadChatHistoryCollapse()).toBe(true);
     const chatPanel = app.navPanels.find((panel) => panel.id === "chat")!;
     const slot = renderSlot(chatPanel, { subPath: "thr_42" });
     const stub = slot.getByTestId("bb-thread-chat");
@@ -1514,6 +1516,39 @@ describe("loadPluginApp", () => {
     expect(stub.getAttribute("data-focus-request")).toBe("2");
     expect(stub.getAttribute("data-message-actions")).toBe("send-to-main");
     expect(stub.className).toBe("demo-chat");
+  });
+
+  it("records controlled history collapse and requests expansion without replacing plugin state", () => {
+    const onChange = vi.fn();
+    const slot = renderSlot({
+      component: () => (
+        <ThreadChat
+          threadId="thr_collapsed"
+          experimental_historyCollapsed
+          experimental_onHistoryCollapsedChange={onChange}
+        />
+      ),
+    }, {});
+    const stub = slot.getByTestId("bb-thread-chat");
+    expect(stub.getAttribute("data-history-collapsed")).toBe("true");
+    fireEvent.click(slot.getByTestId("bb-thread-chat-expand-history"));
+    expect(onChange).toHaveBeenCalledWith(false);
+    expect(stub.getAttribute("data-history-collapsed")).toBe("true");
+  });
+
+  it("ignores collapse controls for the timeline-only harness variant", () => {
+    const slot = renderSlot({
+      component: () => (
+        <ThreadChat
+          threadId="thr_timeline"
+          variant="timeline"
+          experimental_historyCollapsed
+          experimental_onHistoryCollapsedChange={vi.fn()}
+        />
+      ),
+    }, {});
+    expect(slot.getByTestId("bb-thread-chat").getAttribute("data-history-collapsed")).toBe("false");
+    expect(slot.queryByTestId("bb-thread-chat-expand-history")).toBeNull();
   });
 
   it("renders leadingContent and drives messageActions through the stub", () => {

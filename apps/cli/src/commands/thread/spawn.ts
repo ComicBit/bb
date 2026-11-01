@@ -81,6 +81,7 @@ interface ThreadSpawnCommandOptions {
   visibility?: string;
   parentNotifications?: string;
   sendAt?: string;
+  createOnly?: boolean;
 }
 
 export function looksLikePath(value: string): boolean {
@@ -413,6 +414,10 @@ export function registerSpawnCommand(
       "JSON value for an --environment-provider that declares inputs (`bb environment providers --json` shows the schema)",
     )
     .option("--send-at <when>", SEND_AT_HELP)
+    .option(
+      "--create-only",
+      "Create an empty pending conversation without running the provider; a later message starts it",
+    )
     .option("--origin-kind <kind>", "Thread origin: fork")
     .option("--source-thread <id>", "Source thread for a fork")
     .option(
@@ -421,12 +426,33 @@ export function registerSpawnCommand(
     )
     .action(
       action(async (opts: ThreadSpawnCommandOptions) => {
-        const prompt = await requireTextInput({
-          file: opts.promptFile,
-          fileLabel: "--prompt-file",
-          inline: opts.prompt,
-          inlineLabel: "--prompt <prompt>",
-        });
+        if (
+          opts.createOnly &&
+          (opts.prompt !== undefined ||
+            opts.promptFile !== undefined ||
+            opts.plan ||
+            (opts.file?.length ?? 0) > 0 ||
+            (opts.image?.length ?? 0) > 0 ||
+            opts.originKind !== undefined ||
+            opts.sourceThread !== undefined ||
+            opts.sourceSeqEnd !== undefined ||
+            opts.sendAt !== undefined ||
+            opts.model !== undefined ||
+            opts.reasoningLevel !== undefined ||
+            opts.serviceTier !== undefined ||
+            (opts.option?.length ?? 0) > 0 ||
+            opts.permissionMode !== undefined)
+        ) {
+          throw new Error("--create-only cannot include a prompt, attachment, plan, fork, scheduled message or execution defaults; select execution on the first real message.");
+        }
+        const prompt = opts.createOnly
+          ? ""
+          : await requireTextInput({
+              file: opts.promptFile,
+              fileLabel: "--prompt-file",
+              inline: opts.prompt,
+              inlineLabel: "--prompt <prompt>",
+            });
         const projectId = resolveExplicitIdFlag({
           flagName: "--project flag",
           value: opts.project,
@@ -589,7 +615,7 @@ export function registerSpawnCommand(
         let thread: Thread;
         try {
           const sdk = createCliBbSdk(getUrl());
-          const input = await uploadClientAttachmentInputs({
+          const input = opts.createOnly ? [] : await uploadClientAttachmentInputs({
             input: buildPromptInputs({
               message: prompt,
               plan: opts.plan,
@@ -605,6 +631,7 @@ export function registerSpawnCommand(
             ...(providerId ? { providerId } : {}),
             ...(opts.model ? { model: opts.model } : {}),
             input,
+            ...(opts.createOnly ? { experimental_createOnly: true as const } : {}),
             ...(reasoningLevel ? { reasoningLevel } : {}),
             ...(opts.title ? { title: opts.title } : {}),
             ...(serviceTier ? { serviceTier } : {}),
@@ -635,7 +662,11 @@ export function registerSpawnCommand(
         }
 
         if (outputJson(opts, thread)) return;
-        console.log(`Thread spawned: ${thread.id}`);
+        console.log(
+          opts.createOnly
+            ? `Thread created (pending): ${thread.id}`
+            : `Thread spawned: ${thread.id}`,
+        );
         if (sendAt !== undefined) {
           console.log(
             `First message scheduled for ${new Date(sendAt).toLocaleString()}; the thread stays pending until then.`,

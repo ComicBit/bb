@@ -137,6 +137,32 @@ function savedAnchor(threadId: string) {
 }
 
 describe("BottomAnchoredScrollBody", () => {
+  it("hides only history while retaining the same scroll owner and footer", () => {
+    const element = (historyCollapsed: boolean) => (
+      <BottomAnchoredScrollBody
+        footer={<input aria-label="Composer draft" defaultValue="Keep me" />}
+        historyCollapsed={historyCollapsed}
+        maxWidthClassName="max-w-none"
+      >
+        <div data-testid="mounted-history">Conversation</div>
+      </BottomAnchoredScrollBody>
+    );
+    const view = render(element(false));
+    const viewport = view.container.querySelector("[data-page-scroll-viewport]");
+    const history = screen.getByTestId("mounted-history");
+    const composer = screen.getByLabelText("Composer draft");
+    view.rerender(element(true));
+    expect(view.container.querySelector("[data-page-scroll-viewport]")).toBe(viewport);
+    expect(screen.getByTestId("mounted-history")).toBe(history);
+    expect(history.closest("[hidden]")).not.toBeNull();
+    expect(screen.getByLabelText("Composer draft")).toBe(composer);
+    expect(composer.closest("[hidden]")).toBeNull();
+    expect(view.container.firstElementChild?.classList.contains("flex-1")).toBe(false);
+    view.rerender(element(false));
+    expect(history.closest("[hidden]")).toBeNull();
+    expect(view.container.firstElementChild?.classList.contains("flex-1")).toBe(true);
+  });
+
   it("restores the reading row exactly after switching threads and back", () => {
     const keysA = rowKeys("thread-a", 120);
     const first = setup("thread-a", keysA);

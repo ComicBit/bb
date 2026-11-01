@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { BbPluginApi, PluginAiServiceStatus } from "@get-bb/plugin-sdk";
 import {
   codexAiHostContract,
+  type CodexAiCompleteResult,
   type CodexAiFailureCode,
   type CodexAiTextResult,
 } from "./ai/host-contract.js";
@@ -41,23 +42,48 @@ export function registerCodexAiService(bb: BbPluginApi): void {
   bb.experimental_aiServices.register({
     id: "codex",
     displayName: "Codex",
-    async complete(prompt, { signal }) {
-      const hostId = await requirePrimaryHostId();
-      let last: CodexAiTextResult | null = null;
-      for (const model of CODEX_TEXT_MODELS) {
+    async complete(prompt, options) {
+      const { signal } = options;
+      const hostId =
+        options.experimental_hostId ?? (await requirePrimaryHostId());
+      const timeoutMs = options.experimental_timeoutMs ?? COMPLETE_TIMEOUT_MS;
+      const models =
+        options.experimental_model === undefined
+          ? CODEX_TEXT_MODELS
+          : [options.experimental_model];
+      let last: CodexAiCompleteResult | null = null;
+      for (const model of models) {
         last = await host.call(
           "codex.ai.complete",
-          { model, prompt, timeoutMs: COMPLETE_TIMEOUT_MS },
+          {
+            model,
+            prompt,
+            timeoutMs,
+            ...(options.experimental_reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: options.experimental_reasoningEffort }),
+            ...(options.experimental_serviceTier === undefined
+              ? {}
+              : { serviceTier: options.experimental_serviceTier }),
+          },
           {
             hostId,
             signal,
-            timeoutMs: COMPLETE_TIMEOUT_MS + HOST_CALL_GRACE_MS,
+            timeoutMs: timeoutMs + HOST_CALL_GRACE_MS,
           },
         );
         if (last.ok || !RETRY_WITH_NEXT_MODEL.has(last.code)) break;
         if (signal.aborted) break;
       }
       if (last === null) throw new Error("Codex did not answer");
+      if (last.ok) {
+        options.experimental_reportResult?.({
+          ...(last.usage === undefined ? {} : { usage: last.usage }),
+          ...(last.serviceTier === undefined
+            ? {}
+            : { serviceTier: last.serviceTier }),
+        });
+      }
       return textOrThrow(last);
     },
     async transcribe(audio, { signal, hint }) {

@@ -60,6 +60,7 @@ import { CronExpressionParser } from "cron-parser";
 import { Hono } from "hono";
 import type {
   BbPluginApi,
+  ExperimentalRecovery,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
@@ -548,6 +549,10 @@ export interface FakePluginHarness
 export interface CreateFakePluginHostOptions {
   machineBootstrap?: MachineBootstrapApi;
   machineResource?: (hostId: string) => Promise<JsonValue | null>;
+  /** Inject native recovery operations; absent capabilities throw. */
+  experimental_recovery?: Partial<ExperimentalRecovery>;
+  /** Inject targeted AI completion without fabricated default results. */
+  experimental_completeAi?: PluginAiServices["complete"];
   /** Defaults to "test-plugin". */
   pluginId?: string;
   /**
@@ -1085,6 +1090,11 @@ function createFakePluginHostInternal(
       };
       disposeHooks.push(dispose);
       return { dispose };
+    },
+    complete(input) {
+      assertLive();
+      if (!options.experimental_completeAi) throw new Error("Targeted inference is unavailable in this plugin host");
+      return options.experimental_completeAi(input);
     },
   };
 
@@ -1640,6 +1650,28 @@ function createFakePluginHostInternal(
     ui,
     events,
     experimental_hooks,
+    experimental_recovery: {
+      snapshot(args) {
+        assertLive();
+        if (!options.experimental_recovery?.snapshot) throw new Error("Native recovery is unavailable in this plugin host");
+        return options.experimental_recovery.snapshot(args);
+      },
+      continue(args) {
+        assertLive();
+        if (!options.experimental_recovery?.continue) throw new Error("Native recovery is unavailable in this plugin host");
+        return options.experimental_recovery.continue({
+          snapshot: args.snapshot,
+          admit: () => !invalidated && !disposed && args.admit() === true,
+        });
+      },
+      async verifySafeguards(args) {
+        assertLive();
+        if (!options.experimental_recovery?.verifySafeguards) throw new Error("Native safeguard verification is unavailable in this plugin host");
+        const receipt = await options.experimental_recovery.verifySafeguards(args);
+        assertLive();
+        return receipt;
+      },
+    },
     experimental_environments,
     experimental_machines,
     experimental_serverAccess: {

@@ -1,5 +1,6 @@
 import { advanceEnvironmentProvisioning } from "../environments/environment-engine.js";
 import { revokeThreadDesktopBrowserControl } from "../desktop-browsers.js";
+import { recordNativeRecoveryStop } from "./thread-events.js";
 import {
   providerEnvironmentHasPendingWork,
   refreshProviderRetirement,
@@ -1520,6 +1521,7 @@ export function requestThreadStopForCurrentState(
   thread: RequestThreadStopForCurrentStateThread,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
 ): void {
+  recordNativeRecoveryStop(deps, thread.id);
   if (hasLiveThreadRuntime(deps, thread)) {
     if (environment === null) {
       return;
@@ -1548,6 +1550,7 @@ export async function stopThreadForCurrentState(
   environment: RequestThreadStopForCurrentStateEnvironment | null,
   options?: { requireStopped: true },
 ): Promise<void> {
+  recordNativeRecoveryStop(deps, thread.id);
   await revokeThreadDesktopBrowserControl(deps, thread.id);
   const failure = await threadStopRequestDeduper.run(thread.id, () =>
     stopThreadUntilSettled(deps, thread.id, environment),

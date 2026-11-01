@@ -24,6 +24,7 @@ type ExpectedBbPluginApiKey =
   | "experimental_aiServices"
   | "experimental_environments"
   | "experimental_hooks"
+  | "experimental_recovery"
   | "experimental_machines"
   | "onInstall"
   | "experimental_serverAccess"
@@ -44,6 +45,12 @@ type ExpectedBbPluginApiKey =
 
 const EXPECTED_BACKEND_ROOT_TYPE_EXPORTS = [
   "BbPluginApi",
+  "ExperimentalAiCompletionInput",
+  "ExperimentalAiCompletionMetadata",
+  "ExperimentalRecovery",
+  "ExperimentalRecoveryContinueResult",
+  "ExperimentalRecoverySnapshot",
+  "ExperimentalRecoverySafeguardsReceipt",
   "MessageDispatchHookContext",
   "MessageDispatchHookDecision",
   "PluginAgents",

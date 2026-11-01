@@ -13,6 +13,7 @@ import { readCodexAuthCredentials } from "./ai/codex-auth.js";
 import { AiServiceFailure, toAiServiceFailure } from "./ai/failure.js";
 import {
   codexAiHostContract,
+  type CodexAiCompleteResult,
   type CodexAiStatus,
   type CodexAiTextResult,
 } from "./ai/host-contract.js";
@@ -38,8 +39,19 @@ export default experimental_defineHostEntry({
   handlers: {
     resolveNativeRoots: (): Promise<ExperimentalNativeRootsResolveAnswer> =>
       resolveCodexNativeRoots({ homeDir: os.homedir(), env: process.env }),
-    "codex.ai.complete": (input, context) =>
-      textResult(completeCodexInference(input, context.signal)),
+    "codex.ai.complete": async (
+      input,
+      context,
+    ): Promise<CodexAiCompleteResult> => {
+      try {
+        return {
+          ok: true,
+          ...(await completeCodexInference(input, context.signal)),
+        };
+      } catch (error) {
+        return toAiServiceFailure(error);
+      }
+    },
     "codex.ai.transcribe": (input, context) =>
       textResult(transcribeCodexVoice(input, context.signal)),
     "codex.ai.status": async (): Promise<CodexAiStatus> => {

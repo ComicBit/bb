@@ -878,6 +878,8 @@ function TestThreadChat({
   variant = "full",
   layout = "contained",
   focusRequest,
+  experimental_historyCollapsed = false,
+  experimental_onHistoryCollapsedChange,
   permissionPolicy = "inherit",
   className,
   leadingContent,
@@ -891,6 +893,9 @@ function TestThreadChat({
       data-layout={layout}
       data-focus-request={focusRequest ?? 0}
       data-permission-policy={permissionPolicy}
+      data-history-collapsed={String(
+        variant !== "timeline" && experimental_historyCollapsed,
+      )}
       data-message-actions={(messageActions ?? [])
         .map((action) => action.id)
         .join(" ")}
@@ -900,6 +905,15 @@ function TestThreadChat({
         <div data-testid="bb-thread-chat-leading-content">{leadingContent}</div>
       )}
       ThreadChat stub ({threadId})
+      {variant !== "timeline" && experimental_onHistoryCollapsedChange ? (
+        <button
+          type="button"
+          data-testid="bb-thread-chat-expand-history"
+          onClick={() => experimental_onHistoryCollapsedChange(false)}
+        >
+          Show conversation
+        </button>
+      ) : null}
       {(messageActions ?? []).map((action) => (
         <button
           key={action.id}
@@ -1763,6 +1777,7 @@ const testPluginSdkApp = {
     return composer.apiList;
   },
   ThreadChat: TestThreadChat,
+  experimental_supportsThreadChatHistoryCollapse: () => true,
   Markdown: TestMarkdown,
   experimental_FileLink: TestFileLink,
   experimental_Icon: ({ name, fallback, ...props }) => (

@@ -4627,6 +4627,17 @@ export interface ThreadChatProps {
   /** Bump to focus the composer (ignored by `variant: "timeline"`). */
   focusRequest?: number;
   /**
+   * Collapse only history, keeping the same native conversation and composer
+   * mounted with their drafts, attachments, mentions and footer controls.
+   * Ignored by the timeline-only variant; omitted preserves existing behavior.
+   */
+  experimental_historyCollapsed?: boolean;
+  /**
+   * Controlled-state request: false on new messages or submission. The host
+   * never changes the supplied collapsed state itself.
+   */
+  experimental_onHistoryCollapsedChange?: (collapsed: boolean) => void;
+  /**
    * Who controls the permission mode sends run with. "inherit" (default)
    * pins every send to the thread's own resolved default and renders the
    * picker as a dimmed label — a plugin surface can never widen it.
@@ -5824,6 +5835,8 @@ export interface PluginSdkApp {
    * stays vendored per §5.5.
    */
   ThreadChat: ComponentType<ThreadChatProps>;
+  /** Resolve current host support, including after late runtime installation. */
+  experimental_supportsThreadChatHistoryCollapse(): boolean;
   /**
    * The host-owned chat-message markdown renderer (see
    * {@link MarkdownProps}).

@@ -136,6 +136,8 @@ function makePendingInteraction(): PendingInteraction {
 }
 
 interface RenderPromptAreaOptions {
+  historyCollapseEnabled?: boolean;
+  onSubmitMessage?: () => void;
   activePromptMode?: ThreadTimelineActivePromptMode | null;
   activeWorkflows?: TimelineWorkflowWorkRow[];
   childThreadsSection?: ComponentProps<
@@ -159,6 +161,8 @@ interface RenderPromptAreaOptions {
 let testQueryClient: QueryClient;
 
 function buildPromptAreaElement({
+  historyCollapseEnabled = false,
+  onSubmitMessage,
   activePromptMode = null,
   activeWorkflows = [],
   childThreadsSection = null,
@@ -183,6 +187,8 @@ function buildPromptAreaElement({
         composerId="thread-detail-follow-up-composer"
         isPrimaryComposer
         permissionPolicy={permissionPolicy}
+        historyCollapseEnabled={historyCollapseEnabled}
+        onSubmitMessage={onSubmitMessage}
         canRestoreEnvironment={false}
         environmentGoneStatus={environmentGoneStatus}
         goal={goal}
@@ -393,9 +399,35 @@ describe("agent session options", () => {
 });
 
 describe("ThreadDetailPromptArea", () => {
+  it("retains queue controls and Stop beside pending interactions for collapse-enabled chats", () => {
+    mocks.queuedMessages = [makeQueuedMessage()];
+    renderPromptArea({
+      historyCollapseEnabled: true,
+      pendingInteractions: [makePendingInteraction()],
+      thread: makeThread({ status: "active", runtime: { displayStatus: "active" } }),
+    });
+    expect(screen.getByText("Pending interaction")).toBeTruthy();
+    const queue = screen.getByTestId("queued-message-list");
+    expect(queue.dataset.sendDisabled).toBe("");
+    expect(screen.getByRole("button", { name: "Edit queued message 1" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(mocks.stopThreadMutate).toHaveBeenCalledWith("thr_1");
+  });
+
+  it("does not request history expansion for an invalid empty submission", async () => {
+    const onSubmitMessage = vi.fn();
+    renderPromptArea({ historyCollapseEnabled: true, onSubmitMessage });
+    fireEvent.click(screen.getByRole("button", { name: "Capture plugin host" }));
+    await expect(mocks.composerSubmit?.()).rejects.toThrow("Type a message before submitting it.");
+    expect(onSubmitMessage).not.toHaveBeenCalled();
+  });
+
   it("sends plugin data through the send endpoint while Enter queues", async () => {
     mocks.promptDraft.text = "Queue this with data";
+    const onSubmitMessage = vi.fn();
     renderPromptArea({
+      historyCollapseEnabled: true,
+      onSubmitMessage,
       thread: makeThread({
         runtime: { displayStatus: "active" },
         status: "active",
@@ -417,6 +449,7 @@ describe("ThreadDetailPromptArea", () => {
         pluginSubmission,
       }),
     );
+    expect(onSubmitMessage).toHaveBeenCalledTimes(1);
   });
 
   it("lets the server decide whether an Enter submitted while the thread looks busy queues", async () => {
@@ -446,7 +479,10 @@ describe("ThreadDetailPromptArea", () => {
 
   it("steers with sendAt and plugin data from the modifier action", async () => {
     mocks.promptDraft.text = "Steer this later";
+    const onSubmitMessage = vi.fn();
     renderPromptArea({
+      historyCollapseEnabled: true,
+      onSubmitMessage,
       thread: makeThread({
         runtime: { displayStatus: "active" },
         status: "active",
@@ -472,11 +508,15 @@ describe("ThreadDetailPromptArea", () => {
         pluginSubmission,
       }),
     );
+    expect(onSubmitMessage).toHaveBeenCalledTimes(1);
   });
 
   it("refuses sendAt when the modifier action would steer the next queued message", async () => {
     mocks.queuedMessages = [makeQueuedMessage()];
+    const onSubmitMessage = vi.fn();
     renderPromptArea({
+      historyCollapseEnabled: true,
+      onSubmitMessage,
       thread: makeThread({
         runtime: { displayStatus: "idle" },
         status: "idle",
@@ -490,6 +530,7 @@ describe("ThreadDetailPromptArea", () => {
       mocks.composerModifierSubmit?.({ sendAt: 1234567890 }),
     ).rejects.toThrow("There is no new message to schedule or attach data to.");
     expect(mocks.sendQueuedMessageMutateAsync).not.toHaveBeenCalled();
+    expect(onSubmitMessage).not.toHaveBeenCalled();
   });
 
   it("preserves the reasoning preference on follow-ups when the selected model's levels are unknown", async () => {
@@ -720,8 +761,11 @@ describe("ThreadDetailPromptArea", () => {
 
   it("sends the next queued message with the modifier shortcut after a stopped thread becomes idle", async () => {
     mocks.queuedMessages = [makeQueuedMessage()];
+    const onSubmitMessage = vi.fn();
 
     renderPromptArea({
+      historyCollapseEnabled: true,
+      onSubmitMessage,
       thread: makeThread({
         runtime: {
           displayStatus: "idle",
@@ -740,14 +784,18 @@ describe("ThreadDetailPromptArea", () => {
         queuedMessageId: "qmsg_1",
       });
     });
+    expect(onSubmitMessage).toHaveBeenCalledTimes(1);
   });
 
   it("steers a queued row once a provisioning thread is ready", async () => {
     mocks.queuedMessages = [
       makeQueuedMessage({ waitingOn: { kind: "provisioning" } }),
     ];
+    const onSubmitMessage = vi.fn();
 
     renderPromptArea({
+      historyCollapseEnabled: true,
+      onSubmitMessage,
       thread: makeThread({
         runtime: {
           displayStatus: "provisioning",
@@ -772,6 +820,7 @@ describe("ThreadDetailPromptArea", () => {
         queuedMessageId: "qmsg_1",
       });
     });
+    expect(onSubmitMessage).toHaveBeenCalledTimes(1);
   });
 
   it("uses the real thread cache keys immediately", () => {

@@ -59,6 +59,7 @@ interface RequestThreadProvisionArgs {
   author: DispatchAuthor;
   environmentIntent: ThreadProvisionEnvironmentIntent;
   execution: ResolvedThreadExecutionOptions;
+  provenance?: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   fork: ThreadForkDescriptor | null;
   input: PromptInput[];
   originPluginId: string | null;
@@ -76,6 +77,7 @@ interface RequestThreadTargetReprovisionArgs {
   inputGroups?: PromptInput[][];
   initiator: ThreadTurnInitiator;
   originPluginId: string | null;
+  provenance?: RequestThreadProvisionArgs["provenance"];
   senderThreadId: string | null;
   systemMessageKind?: SystemMessageKind;
   systemMessageSubject?: SystemMessageSubject | null;
@@ -305,6 +307,7 @@ export function requestThreadProvision(
       execution: args.execution,
       initiator,
       originPluginId: args.originPluginId,
+      provenance: args.provenance,
       senderThreadId,
       requestMethod: "thread/start",
       source: "spawn",
@@ -452,6 +455,7 @@ function appendReprovisionTurnRequest(
             execution: args.execution,
             initiator: args.initiator,
             originPluginId: args.originPluginId,
+            provenance: args.provenance,
             senderThreadId: args.senderThreadId,
             systemMessageKind: args.systemMessageKind,
             systemMessageSubject: args.systemMessageSubject,

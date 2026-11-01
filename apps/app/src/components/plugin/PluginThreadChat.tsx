@@ -57,13 +57,18 @@ export function PluginThreadChat({
   variant = "full",
   layout = "contained",
   focusRequest,
+  experimental_historyCollapsed,
+  experimental_onHistoryCollapsedChange,
   permissionPolicy = "inherit",
   className,
   leadingContent,
   messageActions,
 }: ThreadChatProps) {
   const containerClassName = cn(
-    layout === "contained" ? "flex h-full min-h-0 flex-col" : "flex flex-col",
+    layout === "contained" &&
+      !(variant !== "timeline" && experimental_historyCollapsed)
+      ? "flex h-full min-h-0 flex-col"
+      : "flex flex-col",
     className,
   );
   return (
@@ -73,6 +78,8 @@ export function PluginThreadChat({
         variant={variant}
         layout={layout}
         focusRequest={focusRequest}
+        historyCollapsed={experimental_historyCollapsed}
+        onHistoryCollapsedChange={experimental_onHistoryCollapsedChange}
         permissionPolicy={permissionPolicy}
         leadingContent={leadingContent}
         messageActions={messageActions}
@@ -86,6 +93,8 @@ interface PluginThreadChatBodyProps {
   variant: "full" | "compact" | "timeline";
   layout: "contained" | "document";
   focusRequest: number | undefined;
+  historyCollapsed: boolean | undefined;
+  onHistoryCollapsedChange: ((collapsed: boolean) => void) | undefined;
   permissionPolicy: "inherit" | "editable";
   leadingContent: ReactNode;
   messageActions: readonly ThreadChatMessageAction[] | undefined;
@@ -96,6 +105,8 @@ function PluginThreadChatBody({
   variant,
   layout,
   focusRequest,
+  historyCollapsed,
+  onHistoryCollapsedChange,
   permissionPolicy,
   leadingContent,
   messageActions,
@@ -320,6 +331,11 @@ function PluginThreadChatBody({
           }
           environment={environment}
           presentation={presentation}
+          historyCollapsed={hasComposer ? historyCollapsed : undefined}
+          historyStatusError={threadQuery.isError}
+          onHistoryCollapsedChange={
+            hasComposer ? onHistoryCollapsedChange : undefined
+          }
           projectId={thread.projectId}
           resolveMentionLink={resolveMentionLink}
           thread={thread}
