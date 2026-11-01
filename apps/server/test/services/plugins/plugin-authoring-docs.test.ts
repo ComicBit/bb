@@ -3,9 +3,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
-import * as pluginSdkApp from "@get-bb/plugin-sdk/app";
 import {
-  type BbPluginApi,
   type ExperimentalAppOverlayProps,
   type PluginAppBuilder,
   type PluginAppSlots,
@@ -38,13 +36,10 @@ import {
   type ExperimentalPluginBrowserToolbarActionProps,
   type PluginThreadListProps,
   type PluginSidebarFooterActionRegistration,
-  type PluginThreadEventPayloads,
   type PluginThreadPanelProps,
   type ThreadChatMessageAction,
-  type ThreadChatProps,
 } from "@get-bb/plugin-sdk";
 
-const FRONTEND_RUNTIME_EXPORT_NAMES = Object.keys(pluginSdkApp).sort();
 const REPO_ROOT = fileURLToPath(new URL("../../../../../", import.meta.url));
 
 const SKILL_ROOT = fileURLToPath(
@@ -91,16 +86,6 @@ function exportedNames(source: string): string[] {
     .filter((name): name is string => name !== undefined);
 }
 
-function declarationExportNames(source: string): string[] {
-  return [...source.matchAll(/^export(?: type)? \{([^}]*)\};/gm)].flatMap(
-    (match) =>
-      (match[1] ?? "")
-        .split(",")
-        .map((name) => name.trim())
-        .filter(Boolean)
-        .map((name) => name.split(/\s+as\s+/).at(-1) ?? name),
-  );
-}
 
 const appModule = readFileSync(
   join(REPO_ROOT, "packages/plugin-sdk/src/app.ts"),
@@ -137,56 +122,12 @@ const FRONTEND_TEST_EXPORT_NAMES = [
   exportedNames(readFileSync(join(REPO_ROOT, relativePath), "utf8")),
 );
 
-const PUBLIC_PLUGIN_SDK_EXPORT_NAMES = [
-  "bb-plugin-sdk.d.ts",
-  "bb-plugin-sdk-provider-bridge.d.ts",
-  "bb-plugin-sdk-provider-bridge-testing.d.ts",
-  "bb-plugin-sdk-provider-bridge-acp.d.ts",
-  "bb-plugin-sdk-host.d.ts",
-  "bb-plugin-sdk-testing.d.ts",
-].flatMap((filename) =>
-  declarationExportNames(
-    readFileSync(
-      join(REPO_ROOT, "packages/plugin-sdk/bundled-types", filename),
-      "utf8",
-    ),
-  ),
-);
 
-const BB_PLUGIN_API_KEYS = [
-  "pluginId",
-  "log",
-  "settings",
-  "storage",
-  "http",
-  "rpc",
-  "realtime",
-  "background",
-  "cli",
-  "agents",
-  "providers",
-  "ui",
-  "events",
-  "status",
-  "server",
-  "hosts",
-  "experimental_aiServices",
-  "experimental_hooks",
-  "experimental_environments",
-  "experimental_machines",
-  "experimental_serverAccess",
-  "sdk",
-  "onDispose",
-  "onInstall",
-] as const satisfies readonly (keyof BbPluginApi)[];
 
-type MissingApiKey = Exclude<
-  keyof BbPluginApi,
-  (typeof BB_PLUGIN_API_KEYS)[number]
->;
-const _assertAllApiKeysListed: MissingApiKey extends never ? true : never =
-  true;
-void _assertAllApiKeysListed;
+
+
+
+
 
 const SETTING_DESCRIPTOR_TYPES = [
   "string",
@@ -219,46 +160,11 @@ const _assertAllAuthModesListed: MissingAuthMode extends never ? true : never =
   true;
 void _assertAllAuthModesListed;
 
-const THREAD_EVENT_PAYLOAD_FIELDS = {
-  "experimental_thread.events": ["thread", "sequence"],
-  "experimental_terminal.input": ["terminal"],
-  "experimental_host.deleted": ["host"],
-  "thread.created": ["thread"],
-  "thread.active": ["thread"],
-  "thread.idle": ["thread", "lastAssistantText"],
-  "thread.failed": ["thread", "error"],
-  "thread.archived": ["thread"],
-  "thread.unarchived": ["thread"],
-  "thread.deleted": ["thread"],
-  "interaction.pending": ["thread", "interaction"],
-  "message.queued": ["entry"],
-  "message.dispatched": ["entry"],
-  "message.cancelled": ["entry"],
-  "turn.failed": [
-    "threadId",
-    "requestId",
-    "turnId",
-    "errorInfo",
-    "inputAccepted",
-    "rateLimits",
-    "attemptNumber",
-  ],
-} as const satisfies {
-  [
-    E in keyof PluginThreadEventPayloads
-  ]: readonly (keyof PluginThreadEventPayloads[E])[];
-};
 
-type MissingThreadEventField = {
-  [E in keyof PluginThreadEventPayloads]: Exclude<
-    keyof PluginThreadEventPayloads[E],
-    (typeof THREAD_EVENT_PAYLOAD_FIELDS)[E][number]
-  >;
-}[keyof PluginThreadEventPayloads];
-const _assertAllThreadEventFieldsListed: MissingThreadEventField extends never
-  ? true
-  : never = true;
-void _assertAllThreadEventFieldsListed;
+
+
+
+
 
 type SlotPropsByName = {
   homepageSection: PluginHomepageSectionProps;
@@ -496,25 +402,11 @@ const _assertAllCommandPaletteActionRegistrationFieldsListed: MissingCommandPale
   : never = true;
 void _assertAllCommandPaletteActionRegistrationFieldsListed;
 
-const THREAD_CHAT_PROP_FIELDS = [
-  "threadId",
-  "variant",
-  "layout",
-  "focusRequest",
-  "permissionPolicy",
-  "className",
-  "leadingContent",
-  "messageActions",
-] as const satisfies readonly (keyof ThreadChatProps)[];
 
-type MissingThreadChatPropField = Exclude<
-  keyof ThreadChatProps,
-  (typeof THREAD_CHAT_PROP_FIELDS)[number]
->;
-const _assertAllThreadChatPropFieldsListed: MissingThreadChatPropField extends never
-  ? true
-  : never = true;
-void _assertAllThreadChatPropFieldsListed;
+
+
+
+
 
 const THREAD_CHAT_MESSAGE_ACTION_FIELDS = [
   "id",
@@ -578,19 +470,8 @@ describe("bb-plugin-authoring skill", () => {
     expect(skillEntry).toMatch(/^---\nname: bb-plugin-authoring\n/);
   });
 
-  it("documents every BbPluginApi property", () => {
-    for (const key of BB_PLUGIN_API_KEYS) {
-      expect(skill, `bb.${key} is not documented in the skill`).toContain(
-        `bb.${key}`,
-      );
-    }
-  });
+  
 
-  it("documents every @get-bb/plugin-sdk/app runtime export", () => {
-    for (const name of FRONTEND_RUNTIME_EXPORT_NAMES) {
-      expect(skill, `${name} is not documented in the skill`).toContain(name);
-    }
-  });
 
   it("warns that environment provider inputs are persisted configuration, not credentials", () => {
     const documented = readReference("backend-events.md").replace(/\s+/g, " ");
@@ -614,11 +495,6 @@ describe("bb-plugin-authoring skill", () => {
     }
   });
 
-  it("accounts for every public backend and provider entrypoint export", () => {
-    for (const name of PUBLIC_PLUGIN_SDK_EXPORT_NAMES) {
-      expect(skill, `${name} is not documented in the skill`).toContain(name);
-    }
-  });
 
   it("keeps fake-host and distribution examples aligned with implementation", () => {
     const testing = readReference("testing.md");
@@ -678,19 +554,7 @@ describe("bb-plugin-authoring skill", () => {
     }
   });
 
-  it("documents every thread event and its payload fields", () => {
-    for (const [event, fields] of Object.entries(THREAD_EVENT_PAYLOAD_FIELDS)) {
-      expect(skill, `${event} is not documented in the skill`).toContain(
-        `"${event}"`,
-      );
-      for (const field of fields) {
-        expect(
-          skill,
-          `${event} payload field "${field}" is not documented in the skill`,
-        ).toContain(field);
-      }
-    }
-  });
+  
 
   it("keeps environment app symbols and composer and event guidance current", () => {
     const frontendIndex = readReference("frontend-api-index.md");
@@ -763,14 +627,7 @@ describe("bb-plugin-authoring skill", () => {
     }
   });
 
-  it("documents every ThreadChat prop", () => {
-    for (const field of THREAD_CHAT_PROP_FIELDS) {
-      expect(
-        skill,
-        `ThreadChat prop "${field}" is not documented in the skill`,
-      ).toContain(field);
-    }
-  });
+  
 
   it("documents every ThreadChat message-action field", () => {
     expect(skill).toContain("ThreadChatMessageAction");

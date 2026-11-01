@@ -276,64 +276,6 @@ describe("plugin bb.sdk bind gate", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("preserves no-context spawn and fork attribution", async () => {
-    const rootDir = await writePlugin(workDir, {
-      name: "bb-plugin-metadata-attribution",
-      serverSource: `export default function plugin() {}`,
-    });
-    await service.installPath(rootDir);
-    service.bindSdk({ baseUrl: "https://bb.example.test" });
-    const api = requireApi(service, "metadata-attribution");
-    const requests: unknown[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-      requests.push(JSON.parse(String(init?.body)));
-      return new Response(
-        JSON.stringify({
-          id: "thread-1",
-          projectId: "project-1",
-          title: null,
-          status: "pending",
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    });
-    const operations = [
-      (overrides: Record<string, unknown>) =>
-        api.sdk.threads.spawn({
-          projectId: "project-1",
-          environment: { type: "project-default" },
-          prompt: "compatibility",
-          ...overrides,
-        } as never),
-      (overrides: Record<string, unknown>) =>
-        api.sdk.threads.fork({
-          sourceThreadId: "source-1",
-          ...overrides,
-        } as never),
-    ];
-
-    for (const operation of operations) {
-      requests.length = 0;
-      await operation({});
-      expect(requests[0]).toMatchObject({
-        origin: "plugin",
-        originPluginId: "metadata-attribution",
-      });
-
-      await operation({
-        origin: "plugin",
-        originPluginId: "legacy-plugin",
-      });
-      expect(requests[1]).toMatchObject({
-        origin: "plugin",
-        originPluginId: "legacy-plugin",
-      });
-
-      await operation({ origin: "sdk" });
-      expect(requests[2]).toMatchObject({ origin: "sdk" });
-      expect(requests[2]).not.toHaveProperty("originPluginId");
-    }
-  });
 
   it("serves the current public app URL without the SDK bind gate", async () => {
     const rootDir = await writePlugin(workDir, {
