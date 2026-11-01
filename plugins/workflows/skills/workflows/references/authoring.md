@@ -51,6 +51,33 @@ and per-agent result schemas; rejection errors identify the unsafe schema path.
   explicitly assigns this agent to a progress group; use this inside
   `pipeline()`/`parallel()` stages to avoid races on the global `phase()` state —
   same phase string → same group.
+  - `opts.environment` places the worker somewhere other than the run's origin
+    workspace. `{ worktree: {} }` provisions a fresh managed worktree on the
+    origin's host, based on the exact HEAD commit captured when the run starts
+    (and persisted across restarts), never a branch tip resolved later.
+    A run refuses a known dirty origin unless `allowDirty` is set; this override
+    excludes uncommitted changes from lanes. A default-base lane refuses to
+    provision when the launch commit was unavailable. An explicit
+    `{ worktree: { baseBranch: "release/2" } }` instead selects that branch at
+    provisioning time. `{ environmentId }` reuses an existing workspace, for
+    example an executor's worktree for review. BB names new worktree branches.
+  - `opts.continue: "<threadId>"` sends this prompt to an existing worker
+    instead of spawning a new one: the worker keeps its conversation, its
+    workspace, and its own execution settings. It must be an idle, unarchived,
+    successful worker owned by this same run, with unchanged project and
+    environment and a matching provider. Overlapping calls to the same worker
+    are refused. Cannot be combined with `environment`; cached identities from
+    another run do not grant continuation ownership.
+  - `opts.reportIdentity: true` resolves to
+    `{ value, threadId, environmentId, branchName, changedFiles }` instead of the
+    bare value — `threadId` for `continue`, `environmentId` for a reviewer,
+    `branchName` for a merge, and `changedFiles` (files committed versus the
+    base, or null when unknown) to skip review for a lane that changed nothing.
+  - A worker placed in its own worktree is parented to the origin thread so the
+    orchestrator can reach it; ordinary workers stay root threads. Only the
+    call that provisions a new worktree automatically commits its worker's
+    uncommitted changes. Reused environments and continued workers are never
+    automatically committed; their workers must commit their own changes.
 - `pipeline(items, stage1, stage2, ...)`: run each item through all stages
   independently, NO barrier between stages. Item A can be in stage 3 while item
   B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock =

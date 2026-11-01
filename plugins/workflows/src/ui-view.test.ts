@@ -29,11 +29,16 @@ function call(index: number, phase: string | null): WorkflowCallInspection {
     startedAt: index,
     lastActivityAt: index,
     finishedAt: index + 1,
+    environmentId: null,
+    branchName: null,
     options: {
       selection: null,
       outputSchema: null,
       title: `Agent ${index}`,
       phase,
+      environment: null,
+      continueThreadId: null,
+      reportIdentity: false,
     },
     execution: {
       provider: "codex",

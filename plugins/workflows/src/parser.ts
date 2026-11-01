@@ -131,7 +131,7 @@ function inspectAgentOptions(
     }
     const key = propertyName(property);
     if (key === null) throw new Error("agent options contain an invalid key");
-    if (!AGENT_OPTION_KEYS.has(key)) {
+    if (AGENT_OPTION_KEYS[key] !== true) {
       throw new Error(`Unknown agent option ${JSON.stringify(key)}`);
     }
     if (properties.has(key)) {

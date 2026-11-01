@@ -17,14 +17,33 @@ paths, missing workspace roots, non-UTF-8 files, and sources over 512 KiB are
 rejected. QuickJS receives source text only; it never gets filesystem access.
 Plugin-bundled workflow discovery is not supported.
 
-`bb_workflow_run` also accepts optional JSON `args` and optional `resumeRunId`.
-It returns a durable run ID immediately. Use the compact `bb workflows status`
-summary, paged `bb workflows history`, `bb workflows list`, and
-`bb workflows stop` afterward. Completion is sent back as an agent-only input:
-it steers an active origin immediately or starts a turn when the origin is idle,
-without rendering a user-facing message. Delivery is duplicate-tolerant
-at-least-once because `threads.send` has no idempotency key. CLI status polling
-remains authoritative.
+`bb_workflow_run` also accepts optional JSON `args`, optional `resumeRunId`, and
+optional `allowDirty`. It returns a durable run ID immediately. Use the compact
+`bb workflows status` summary, paged `bb workflows history`,
+`bb workflows list`, and `bb workflows stop` afterward. Completion is sent back
+as an agent-only input: it steers an active origin immediately or starts a turn
+when the origin is idle, without rendering a user-facing message. Delivery is
+duplicate-tolerant at-least-once because `threads.send` has no idempotency key.
+CLI status polling remains authoritative.
+
+A run whose origin workspace has uncommitted changes is REFUSED, because a
+worker placed in its own worktree starts from the exact HEAD captured at launch
+and would never see that work. Commit first, or pass `allowDirty: true`
+(`--allow-dirty`) to accept excluding it. Unavailable Git status does not block
+plain calls, but a default-base worktree cannot be provisioned without a known
+launch commit.
+
+## Tearing down lane worktrees
+
+`bb workflows teardown <run-id>` destroys the worktrees a terminal run
+provisioned through `agent()`'s `{ worktree: ... }` environment option. Origin,
+explicitly reused, continued, and cached/replayed environments never acquire
+destructive ownership. It archives owned lane threads, then requests deletion.
+A lane whose tree still has uncommitted changes is KEPT unless
+`--discard-uncommitted` explicitly accepts losing them. Unavailable, unknown,
+or not-applicable Git status always preserves a lane, even with that flag.
+Worktree removal is `git worktree remove --force`; lane branches survive, so
+committed work stays reachable. The report lists `destroyed` and `kept`.
 
 `list` also returns compact summaries; it is safe for discovery but is not a
 substitute for the redirected detailed history.
@@ -53,8 +72,11 @@ same project and environment workspace and always creates a new run. The
 longest unchanged prefix of successful `agent()` calls returns cached results;
 the first edited or new call and everything after it runs live. The cache key
 includes call order, prompt, resolved provider/model/reasoning/permission,
-output schema, and worker protocol semantics. Display-only phase, label, and
-title changes do not invalidate it.
+output schema, worker protocol semantics, and placement — the environment the
+call ran in and the worker it continued. Display-only phase, label, and title
+changes do not invalidate it. A replayed call returns the same worker thread,
+environment, and branch it originally reported, so resume never
+double-provisions a worktree.
 
 Parallel calls receive cache identities in deterministic invocation order, so
 concurrency alone does not stop replay. Successful calls that edited files or
@@ -83,6 +105,8 @@ bb workflows status <run-id>
 bb workflows history <run-id> --cursor 0 --limit 100
 bb workflows list --limit 20
 bb workflows stop <run-id>
+bb workflows run --name lanes --args '<json>' --allow-dirty
+bb workflows teardown <run-id> [--discard-uncommitted]
 bb provider list --environment "$BB_ENVIRONMENT_ID" --json
 bb provider models <provider-id> --environment "$BB_ENVIRONMENT_ID" --json
 ```
@@ -101,10 +125,9 @@ alongside the readable message on stderr.
 Workflow worker threads use hidden visibility and are plugin-attributed. They
 stay out of sidebar organization without contributing unread/pending favicon
 attention. Ordinary search, prompt history,
-lifecycle, and direct operations remain available. Workers are root threads,
-so no parent notification applies; a hidden thread that does have a parent
-still reports its turns and blockers to it. Workflows does not create a
-temporary Workflow folder.
+lifecycle, and direct operations remain available. Ordinary workers are root
+threads; worktree-placed workers are parented to the orchestrator and report
+their turns and blockers to it. Workflows does not create a temporary folder.
 
 ## Settings
 
@@ -127,10 +150,12 @@ to compact progress and call counts. Paged JSONL `history` carries ordered
 call-level execution, cache, child-thread, repair, result, and error details.
 
 Workers are hidden and owned by the workflow plugin across every retry attempt.
-Finished, replaced, cancelled, and unattached workers are stopped and archived
-by maintenance without waiting for history retention. Cleanup retries across
-restarts and survives history expiry. Archiving or deleting an origin cancels
-its outstanding workflows and retires its owned workers while preserving
+Finished ordinary, replaced, cancelled, and unattached workers are stopped and
+archived by maintenance without waiting for history retention. Identity-reporting
+and placed workers stay available for continuation while their run is active,
+and retire when it becomes terminal; active continuations cannot be retired.
+Cleanup retries across restarts and survives history expiry. Archiving or
+deleting an origin cancels its workflows and retires its owned workers while preserving
 retained history. Completion notification becomes `abandoned` for an archived
 or deleted origin; unrelated send conflicts and transient failures retry.
 Upgrades recover existing call references; older attempts already missing from

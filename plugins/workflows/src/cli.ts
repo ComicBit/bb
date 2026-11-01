@@ -343,6 +343,10 @@ export function registerWorkflowCli(
                 "Reuse the recorded results of a previous run for calls that match",
             },
             json: { type: "boolean", description: JSON_OPTION_DESCRIPTION },
+            "allow-dirty": {
+              type: "boolean",
+              description: "Allow lanes to exclude uncommitted origin changes",
+            },
           },
           run(input, ctx) {
             return guarded(async () => {
@@ -358,6 +362,7 @@ export function registerWorkflowCli(
                 source: prepared.source,
                 args: parseJsonOption(input.options.args),
                 resumedFromRunId: input.options.resume ?? null,
+                allowDirty: input.options["allow-dirty"] === true,
               });
               return success({
                 runId: run.id,
@@ -501,6 +506,30 @@ export function registerWorkflowCli(
                 throw new Error(`Unknown workflow run ${runId}`);
               }
               return success({ runId, stopped: await service.stop(runId) });
+            });
+          },
+        }),
+        teardown: cliCommand({
+          summary: "Remove only worktrees provisioned by this run",
+          positionals: [RUN_ID_POSITIONAL],
+          options: {
+            "discard-uncommitted": {
+              type: "boolean",
+              description: "Discard known uncommitted work in owned worktrees",
+            },
+            json: { type: "boolean", description: JSON_OPTION_DESCRIPTION },
+          },
+          run(input, ctx) {
+            return guarded(async () => {
+              const context = requireContext(ctx);
+              const runId = input.positionals["run-id"];
+              const run = service.get(runId);
+              if (run === null || run.projectId !== context.projectId) {
+                throw new Error(`Unknown workflow run ${runId}`);
+              }
+              return success(await service.teardown(runId, {
+                discardUncommitted: input.options["discard-uncommitted"] === true,
+              }));
             });
           },
         }),

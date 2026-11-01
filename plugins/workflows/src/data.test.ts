@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_WORKFLOW_SETTINGS } from "./settings.js";
+import type { WorkflowAgentOptions } from "./types.js";
 import {
   attachCallThread,
   isWorkerRetired,
@@ -17,6 +18,8 @@ import {
   incrementRepairAttempts,
   listCallsForRunPage,
   listExpiredTerminalRuns,
+  listRunProvisionedEnvironments,
+  recordCallPlacement,
   migrations,
   queueCallProviderRetry,
   recoverInterruptedRuns,
@@ -25,6 +28,21 @@ import {
   startCall,
   storeStructuredResult,
 } from "./data.js";
+
+function agentOptions(
+  overrides: Partial<WorkflowAgentOptions> = {},
+): WorkflowAgentOptions {
+  return {
+    selection: null,
+    outputSchema: null,
+    title: null,
+    phase: null,
+    environment: null,
+    continueThreadId: null,
+    reportIdentity: false,
+    ...overrides,
+  };
+}
 
 describe("workflow durable data", () => {
   let db: Database.Database;
@@ -111,27 +129,24 @@ describe("workflow durable data", () => {
     db.close();
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    db.exec(migrations.slice(0, -3).join("\n"));
-    const run = newRun();
-    markRunning(run.id);
-    const call = startCall(db, {
-      runId: run.id,
-      callIndex: 0,
-      cacheKey: "migration",
-      prompt: "work",
-      options: {
-        title: null,
-        phase: null,
-        outputSchema: null,
-        selection: null,
-      },
-      selection: resolvedSelection,
-      replay: null,
-    });
+    db.exec(migrations.slice(0, 8).join("\n"));
+    db.prepare(`INSERT INTO workflow_runs (
+      id, project_id, origin_thread_id, environment_id, origin_provider,
+      origin_model, origin_reasoning_level, origin_permission_mode, name,
+      source, source_hash, args_json, status, created_at
+    ) VALUES ('legacy-run', 'project-1', 'thread-1', 'environment-1', 'codex',
+      'gpt-test', 'medium', 'full', 'test', 'return null', 'hash', 'null', 'running', 0)`).run();
+    db.prepare(`INSERT INTO workflow_calls (
+      id, run_id, call_index, cache_key, prompt, options_json, resolved_provider,
+      resolved_model, resolved_reasoning_level, resolved_permission_mode, status, created_at
+    ) VALUES ('legacy-call', 'legacy-run', 0, 'key', 'work', '{}', 'codex',
+      'gpt-test', 'medium', 'full', 'queued', 0)`).run();
+    const run = { id: "legacy-run", originThreadId: "thread-1" };
+    const call = { id: "legacy-call" };
     db.prepare(
       `UPDATE workflow_calls SET child_thread_id = 'legacy-worker', status = 'failed' WHERE id = ?`,
     ).run(call.id);
-    db.exec(migrations.slice(-3).join("\n"));
+    db.exec(migrations.slice(8).join("\n"));
     expect(retiredWorkers(db, Date.now())).toEqual([
       { threadId: "legacy-worker", callId: call.id },
     ]);
@@ -144,8 +159,14 @@ describe("workflow durable data", () => {
     db.close();
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    db.exec(migrations.slice(0, -3).join("\n"));
-    const run = newRun();
+    db.exec(migrations.slice(0, 8).join("\n"));
+    db.prepare(`INSERT INTO workflow_runs (
+      id, project_id, origin_thread_id, environment_id, origin_provider,
+      origin_model, origin_reasoning_level, origin_permission_mode, name,
+      source, source_hash, args_json, status, created_at
+    ) VALUES ('legacy-run', 'project-1', 'thread-1', 'environment-1', 'codex',
+      'gpt-test', 'medium', 'full', 'test', 'return null', 'hash', 'null', 'running', 0)`).run();
+    const run = { id: "legacy-run" };
     const insertCall = db.prepare(
       `INSERT INTO workflow_calls(id, run_id, call_index, cache_key, prompt,
          options_json, resolved_provider, resolved_model, resolved_reasoning_level,
@@ -161,7 +182,7 @@ describe("workflow durable data", () => {
         `worker-${String(index).padStart(3, "0")}`,
       );
     const migratedAt = Date.now();
-    db.exec(migrations.slice(-3).join("\n"));
+    db.exec(migrations.slice(8).join("\n"));
 
     const buckets = db
       .prepare(
@@ -192,12 +213,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "cancel",
       prompt: "work",
-      options: {
-        title: null,
-        phase: null,
-        outputSchema: null,
-        selection: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -225,12 +241,7 @@ describe("workflow durable data", () => {
         callIndex,
         cacheKey,
         prompt: "work",
-        options: {
-          title: null,
-          phase: null,
-          outputSchema: null,
-          selection: null,
-        },
+        options: agentOptions(),
         selection: resolvedSelection,
         replay: null,
       });
@@ -269,6 +280,68 @@ describe("workflow durable data", () => {
     expectRetired("unknown-worker", false);
   });
 
+  it("retains a reusable worker across calls and retires it only after the run ends", () => {
+    const run = newRun();
+    markRunning(run.id);
+    const first = startCall(db, {
+      runId: run.id, callIndex: 0, cacheKey: "first", prompt: "build",
+      options: agentOptions({ reportIdentity: true }),
+      selection: resolvedSelection, replay: null,
+    });
+    expect(attachCallThread(db, first.id, "lane-worker", {
+      environmentId: "lane-env", branchName: "bb/lane", provisionedEnvironment: true,
+    })).toBe(true);
+    settleCall(db, { id: first.id, status: "succeeded", result: "done", error: null });
+    expect(isWorkerRetired(db, "lane-worker")).toBe(false);
+    const next = startCall(db, {
+      runId: run.id, callIndex: 1, cacheKey: "next", prompt: "fix",
+      options: agentOptions({ continueThreadId: "lane-worker" }),
+      selection: resolvedSelection, replay: null,
+    });
+    expect(attachCallThread(db, next.id, "lane-worker", {
+      environmentId: "lane-env", branchName: "bb/lane",
+    })).toBe(true);
+    expect(isWorkerRetired(db, "lane-worker")).toBe(false);
+    settleCall(db, { id: next.id, status: "succeeded", result: "fixed", error: null });
+    expect(isWorkerRetired(db, "lane-worker")).toBe(false);
+    settleRun(db, { id: run.id, status: "succeeded", result: null, error: null });
+    expect(isWorkerRetired(db, "lane-worker")).toBe(true);
+  });
+
+  it("does not infer provisioning ownership from placement or replay", () => {
+    const run = newRun();
+    markRunning(run.id);
+    const owned = startCall(db, {
+      runId: run.id, callIndex: 0, cacheKey: "owned", prompt: "build",
+      options: agentOptions({ environment: { kind: "worktree", baseBranch: null } }),
+      selection: resolvedSelection, replay: null,
+    });
+    attachCallThread(db, owned.id, "owner", {
+      environmentId: "owned-env", branchName: "bb/owned", provisionedEnvironment: true,
+    });
+    const foreign = startCall(db, {
+      runId: run.id, callIndex: 1, cacheKey: "foreign", prompt: "review",
+      options: agentOptions({ environment: { kind: "existing", environmentId: "foreign-env" } }),
+      selection: resolvedSelection, replay: null,
+    });
+    attachCallThread(db, foreign.id, "reviewer", {
+      environmentId: "foreign-env", branchName: "foreign-branch",
+    });
+    const replay = startCall(db, {
+      runId: run.id, callIndex: 2, cacheKey: "replayed", prompt: "build",
+      options: agentOptions(), selection: resolvedSelection,
+      replay: { callId: owned.id, result: "cached" },
+    });
+    recordCallPlacement(db, replay.id, {
+      environmentId: "cached-env", branchName: "cached-branch", provisionedEnvironment: false,
+    });
+    expect(listRunProvisionedEnvironments(db, run.id)).toEqual([
+      { environmentId: "owned-env", branchName: "bb/owned" },
+    ]);
+    expect(getCall(db, run.id, 1)?.provisionedEnvironment).toBe(false);
+    expect(getCall(db, run.id, 2)?.provisionedEnvironment).toBe(false);
+  });
+
   it("records replay safety", () => {
     const run = newRun();
     expect(getRunRequired(db, run.id)).toMatchObject({
@@ -291,12 +364,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "cache",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -310,7 +378,7 @@ describe("workflow durable data", () => {
     expect(getCall(db, run.id, 0)).toMatchObject({
       cacheKey: "cache",
       optionsJson:
-        '{"selection":null,"outputSchema":null,"title":null,"phase":null}',
+        '{"selection":null,"outputSchema":null,"title":null,"phase":null,"environment":null,"continueThreadId":null,"reportIdentity":false}',
       resolvedProvider: "codex",
       resolvedModel: "gpt-test",
       resolvedReasoningLevel: "medium",
@@ -329,12 +397,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "retry",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -372,12 +435,7 @@ describe("workflow durable data", () => {
         callIndex,
         cacheKey: `cache-${callIndex}`,
         prompt: `inspect ${callIndex}`,
-        options: {
-          selection: null,
-          outputSchema: null,
-          title: null,
-          phase: null,
-        },
+        options: agentOptions(),
         selection: resolvedSelection,
         replay: null,
       }),
@@ -428,12 +486,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "cache",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -457,12 +510,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "null-cache",
       prompt: "return null",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -473,6 +521,38 @@ describe("workflow durable data", () => {
       error: null,
     });
     expect(getCall(db, first.id, 0)?.resultJson).toBe("null");
+    const second = createRun(db, {
+      projectId: "project-1",
+      originThreadId: "thread-1",
+      environmentId: "environment-1",
+      originProvider: "codex",
+      originModel: "gpt-test",
+      originReasoningLevel: "medium",
+      originPermissionMode: "full",
+      name: "test-workflow",
+      source: "return null",
+      sourceHash: "hash-2",
+      argsJson: "null",
+      settingsJson:
+        '{"maxActiveRuns":4,"maxConcurrentAgents":8,"maxAgentCalls":100,"totalRunTimeoutMs":86400000,"retentionDays":30,"maxNotificationBytes":16384}',
+      resumedFromRunId: first.id,
+    });
+    markRunning(second.id);
+    startCall(db, {
+      runId: second.id,
+      callIndex: 0,
+      cacheKey: "null-cache",
+      prompt: "return null",
+      options: agentOptions(),
+      selection: resolvedSelection,
+      replay: null,
+    });
+
+    expect(getCall(db, second.id, 0)).toMatchObject({
+      status: "queued",
+      resultJson: null,
+      replayedFromCallId: null,
+    });
   });
 
   it("atomically preserves the first structured value", () => {
@@ -483,12 +563,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "structured",
       prompt: "answer",
-      options: {
-        selection: null,
-        outputSchema: { type: "object" },
-        title: null,
-        phase: null,
-      },
+      options: agentOptions({ outputSchema: { type: "object" } }),
       selection: resolvedSelection,
       replay: null,
     });
@@ -521,12 +596,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "repair",
       prompt: "answer",
-      options: {
-        selection: null,
-        outputSchema: { type: "number" },
-        title: null,
-        phase: null,
-      },
+      options: agentOptions({ outputSchema: { type: "number" } }),
       selection: resolvedSelection,
       replay: null,
     });
@@ -586,12 +656,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "fire-and-forget",
       prompt: "slow",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -635,12 +700,7 @@ describe("workflow durable data", () => {
           callIndex: 0,
           cacheKey: `creation-${status}`,
           prompt: "state matrix",
-          options: {
-            selection: null,
-            outputSchema: null,
-            title: null,
-            phase: null,
-          },
+          options: agentOptions(),
           selection: resolvedSelection,
           replay: null,
         });
@@ -661,12 +721,7 @@ describe("workflow durable data", () => {
         callIndex: 0,
         cacheKey: `attachment-${status}`,
         prompt: "state matrix",
-        options: {
-          selection: null,
-          outputSchema: null,
-          title: null,
-          phase: null,
-        },
+        options: agentOptions(),
         selection: resolvedSelection,
         replay: null,
       });

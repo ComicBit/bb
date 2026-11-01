@@ -39,9 +39,13 @@ Do not guess model identifiers or partial selection tuples.
 - Read references/authoring.md when you write or change workflow source,
   schemas, agent options, or nested workflows.
 - Read references/orchestration.md when you design pipelines, barriers,
-  verification, panels, loops, or other quality controls.
-- Read references/runs.md when you validate, start, inspect, stop, or resume a
-  workflow, or change the plugin's run limits.
+  verification, panels, loops, isolated write lanes, or other quality controls.
+- Read references/runs.md when you validate, start, inspect, stop, resume, or
+  tear down a workflow, or change the plugin's run limits.
+
+Work that WRITES in parallel needs one worktree per lane, not one shared
+workspace: see the isolated-lane pattern in references/orchestration.md and the
+`environment` / `continue` / `reportIdentity` options in references/authoring.md.
 
 ## Minimal source
 

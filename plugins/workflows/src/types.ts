@@ -13,11 +13,36 @@ interface ExplicitModelSelection {
   reasoningLevel: string;
 }
 
+/**
+ * Where a worker runs. Omitted (null) keeps the historical behaviour: the
+ * worker reuses the run's origin environment. `worktree` provisions a fresh
+ * managed worktree; a null `baseBranch` means the branch the origin
+ * environment is on, which is the commit the orchestrator launched from — the
+ * plugin resolves it so a script cannot pin a lane to the wrong base.
+ * `existing` attaches an environment an earlier call created, which is how a
+ * reviewer lands in the same worktree as the executor it reviews.
+ */
+export type WorkflowAgentEnvironment =
+  | { kind: "worktree"; baseBranch: string | null }
+  | { kind: "existing"; environmentId: string };
+
 export interface WorkflowAgentOptions {
   selection: ExplicitModelSelection | null;
   outputSchema: JsonSchema | null;
   title: string | null;
   phase: string | null;
+  environment: WorkflowAgentEnvironment | null;
+  /**
+   * Thread id of an existing worker to send this prompt to instead of
+   * spawning a new one. A continued worker keeps its conversation and its
+   * environment, so it cannot also carry `environment`.
+   */
+  continueThreadId: string | null;
+  /**
+   * Resolve to `{ value, threadId, environmentId, branchName }` instead of the
+   * bare value, so a script can address the worker and its worktree later.
+   */
+  reportIdentity: boolean;
 }
 
 interface WorkflowPhase {

@@ -5,20 +5,24 @@ import type {
   JsonObject,
   JsonSchema,
   JsonValue,
+  WorkflowAgentEnvironment,
   WorkflowAgentOptions,
 } from "./types.js";
 
 export const MAX_WORKFLOW_SOURCE_BYTES = 512 * 1024;
-export const AGENT_OPTION_KEYS = new Set([
-  "provider",
-  "model",
-  "reasoningLevel",
-  "outputSchema",
-  "schema",
-  "title",
-  "label",
-  "phase",
-]);
+export const AGENT_OPTION_KEYS: Record<string, true> = {
+  provider: true,
+  model: true,
+  reasoningLevel: true,
+  outputSchema: true,
+  schema: true,
+  title: true,
+  label: true,
+  phase: true,
+  environment: true,
+  continue: true,
+  reportIdentity: true,
+};
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_SCHEMA_DEPTH = 32;
 const MAX_SCHEMA_NODES = 4_096;
@@ -140,6 +144,25 @@ const storedAgentOptionsSchema = z
     outputSchema: jsonSchemaValueSchema.nullable(),
     title: z.string().min(1).nullable(),
     phase: z.string().min(1).nullable().default(null),
+    environment: z
+      .discriminatedUnion("kind", [
+        z
+          .object({
+            kind: z.literal("worktree"),
+            baseBranch: z.string().min(1).nullable(),
+          })
+          .strict(),
+        z
+          .object({
+            kind: z.literal("existing"),
+            environmentId: z.string().min(1),
+          })
+          .strict(),
+      ])
+      .nullable()
+      .default(null),
+    continueThreadId: z.string().min(1).nullable().default(null),
+    reportIdentity: z.boolean().default(false),
   })
   .strict();
 
@@ -362,6 +385,58 @@ function assertSupportedSchema(schema: JsonSchema, path: string): void {
   }
 }
 
+function parseAgentEnvironment(
+  value: JsonValue | undefined,
+): WorkflowAgentEnvironment | null {
+  if (value === undefined) return null;
+  if (!isObject(value)) {
+    throw new Error("agent options.environment must be an object");
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1) {
+    throw new Error(
+      "agent options.environment must contain exactly one of worktree or environmentId",
+    );
+  }
+  if (Object.hasOwn(value, "environmentId")) {
+    const environmentId = optionalNonEmptyString(value, "environmentId");
+    if (environmentId === null) {
+      throw new Error(
+        "agent options.environment.environmentId must be a non-empty string",
+      );
+    }
+    return { kind: "existing", environmentId };
+  }
+  const worktree = value.worktree;
+  if (worktree === undefined) {
+    throw new Error(
+      "agent options.environment must contain exactly one of worktree or environmentId",
+    );
+  }
+  if (!isObject(worktree)) {
+    throw new Error("agent options.environment.worktree must be an object");
+  }
+  for (const key of Object.keys(worktree)) {
+    if (key !== "baseBranch") {
+      throw new Error(
+        "agent options.environment.worktree accepts only baseBranch",
+      );
+    }
+  }
+  return {
+    kind: "worktree",
+    baseBranch: optionalNonEmptyString(worktree, "baseBranch"),
+  };
+}
+
+function parseReportIdentity(value: JsonValue | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new Error("agent options.reportIdentity must be a boolean");
+  }
+  return value;
+}
+
 export function parseAgentOptions(
   value: JsonValue | undefined,
 ): WorkflowAgentOptions {
@@ -371,12 +446,15 @@ export function parseAgentOptions(
       outputSchema: null,
       title: null,
       phase: null,
+      environment: null,
+      continueThreadId: null,
+      reportIdentity: false,
     };
   }
   if (!isObject(value)) throw new Error("agent options must be an object");
 
   for (const key of Object.keys(value)) {
-    if (!AGENT_OPTION_KEYS.has(key))
+    if (AGENT_OPTION_KEYS[key] !== true)
       throw new Error(`Unknown agent option ${JSON.stringify(key)}`);
   }
 
@@ -421,6 +499,14 @@ export function parseAgentOptions(
     );
   }
 
+  const environment = parseAgentEnvironment(value.environment);
+  const continueThreadId = optionalNonEmptyString(value, "continue");
+  if (continueThreadId !== null && environment !== null) {
+    throw new Error(
+      "agent options.continue cannot be combined with agent options.environment: a continued worker keeps its own environment",
+    );
+  }
+
   return {
     selection:
       provider !== null && model !== null && reasoningLevel !== null
@@ -429,5 +515,8 @@ export function parseAgentOptions(
     outputSchema,
     title: title ?? label,
     phase: optionalNonEmptyString(value, "phase"),
+    environment,
+    continueThreadId,
+    reportIdentity: parseReportIdentity(value.reportIdentity),
   };
 }

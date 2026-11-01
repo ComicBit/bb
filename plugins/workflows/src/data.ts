@@ -17,6 +17,7 @@ export interface WorkflowRunRow {
   projectId: string;
   originThreadId: string;
   environmentId: string;
+  launchBaseCommit: string | null;
   originProvider: string;
   originModel: string;
   originReasoningLevel: string;
@@ -57,6 +58,11 @@ export interface WorkflowCallRow {
   childThreadId: string | null;
   repairAttempts: number;
   providerRetryAttempts: number;
+  /** Environment the worker ran in, once known. */
+  environmentId: string | null;
+  /** Branch of a worktree this call provisioned, or null. */
+  branchName: string | null;
+  provisionedEnvironment: boolean;
   resultJson: string | null;
   error: string | null;
   replayedFromCallId: string | null;
@@ -96,7 +102,8 @@ function optionalRun(value: unknown): WorkflowRunRow | null {
 }
 
 function callRow(value: unknown): WorkflowCallRow {
-  return value as WorkflowCallRow;
+  const row = value as Omit<WorkflowCallRow, "provisionedEnvironment"> & { provisionedEnvironment: number | boolean };
+  return { ...row, provisionedEnvironment: row.provisionedEnvironment === 1 || row.provisionedEnvironment === true };
 }
 
 function optionalCall(value: unknown): WorkflowCallRow | null {
@@ -106,6 +113,7 @@ function optionalCall(value: unknown): WorkflowCallRow | null {
 const RUN_SELECT = `
   SELECT id, project_id AS projectId, origin_thread_id AS originThreadId,
     environment_id AS environmentId, origin_provider AS originProvider,
+    launch_base_commit AS launchBaseCommit,
     origin_model AS originModel, origin_reasoning_level AS originReasoningLevel,
     origin_permission_mode AS originPermissionMode,
     name, source, source_hash AS sourceHash, args_json AS argsJson,
@@ -128,6 +136,8 @@ const CALL_SELECT = `
     resolved_permission_mode AS resolvedPermissionMode, status,
     child_thread_id AS childThreadId, repair_attempts AS repairAttempts,
     provider_retry_attempts AS providerRetryAttempts,
+    environment_id AS environmentId, branch_name AS branchName,
+    provisioned_environment AS provisionedEnvironment,
     result_json AS resultJson, error,
     replayed_from_call_id AS replayedFromCallId, replay_source AS replaySource,
     created_at AS createdAt, last_activity_at AS lastActivityAt,
@@ -232,6 +242,71 @@ export const migrations = [
   `CREATE INDEX workflow_runs_expiry_idx
      ON workflow_runs(finished_at + json_extract(settings_json, '$.retentionDays') * 86400000)
      WHERE status IN ('succeeded', 'failed', 'cancelled') AND notification_sent = 1;`,
+  `ALTER TABLE workflow_calls ADD COLUMN environment_id TEXT;
+   ALTER TABLE workflow_calls ADD COLUMN branch_name TEXT;
+   CREATE INDEX IF NOT EXISTS workflow_calls_run_environment_idx
+     ON workflow_calls(run_id, environment_id);`,
+  // A continued lane worker takes more than one call: the executor's first
+  // turn, then a fix round per review. `child_thread_id` was UNIQUE as a
+  // column constraint, which SQLite backs with an implicit index that cannot
+  // be dropped by name — so the table is rebuilt without it. Routing an idle
+  // event to the right call is `getCallByChildThread`'s job, not the schema's.
+  `ALTER TABLE workflow_calls RENAME TO workflow_calls_pre_lane;
+   CREATE TABLE workflow_calls (
+     id TEXT PRIMARY KEY,
+     run_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
+     call_index INTEGER NOT NULL,
+     cache_key TEXT NOT NULL,
+     prompt TEXT NOT NULL,
+     options_json TEXT NOT NULL,
+     resolved_provider TEXT NOT NULL,
+     resolved_model TEXT NOT NULL,
+     resolved_reasoning_level TEXT NOT NULL,
+     resolved_permission_mode TEXT NOT NULL,
+     status TEXT NOT NULL,
+     child_thread_id TEXT,
+     repair_attempts INTEGER NOT NULL DEFAULT 0,
+     result_json TEXT,
+     error TEXT,
+     replayed_from_call_id TEXT,
+     replay_source TEXT,
+     created_at INTEGER NOT NULL,
+     started_at INTEGER,
+     finished_at INTEGER,
+     last_activity_at INTEGER,
+     provider_retry_attempts INTEGER NOT NULL DEFAULT 0,
+     environment_id TEXT,
+     branch_name TEXT,
+     UNIQUE(run_id, call_index)
+   );
+   INSERT INTO workflow_calls (
+     id, run_id, call_index, cache_key, prompt, options_json,
+     resolved_provider, resolved_model, resolved_reasoning_level,
+     resolved_permission_mode, status, child_thread_id, repair_attempts,
+     result_json, error, replayed_from_call_id, replay_source, created_at,
+     started_at, finished_at, last_activity_at, provider_retry_attempts,
+     environment_id, branch_name
+   )
+   SELECT id, run_id, call_index, cache_key, prompt, options_json,
+     resolved_provider, resolved_model, resolved_reasoning_level,
+     resolved_permission_mode, status, child_thread_id, repair_attempts,
+     result_json, error, replayed_from_call_id, replay_source, created_at,
+     started_at, finished_at, last_activity_at, provider_retry_attempts,
+     environment_id, branch_name
+   FROM workflow_calls_pre_lane;
+   DROP TABLE workflow_calls_pre_lane;
+   CREATE INDEX IF NOT EXISTS workflow_calls_run_idx
+     ON workflow_calls(run_id, call_index);
+   CREATE INDEX IF NOT EXISTS workflow_calls_child_idx
+     ON workflow_calls(child_thread_id);
+   CREATE INDEX IF NOT EXISTS workflow_calls_running_activity_idx
+     ON workflow_calls(status, last_activity_at);
+   CREATE INDEX IF NOT EXISTS workflow_calls_run_environment_idx
+     ON workflow_calls(run_id, environment_id);`,
+  `ALTER TABLE workflow_calls ADD COLUMN provisioned_environment INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE workflow_runs ADD COLUMN launch_base_commit TEXT;
+   CREATE UNIQUE INDEX workflow_calls_active_child_idx ON workflow_calls(child_thread_id)
+     WHERE child_thread_id IS NOT NULL AND status IN ('queued', 'running');`,
 ];
 
 export function createRun(
@@ -252,7 +327,8 @@ export function createRun(
     | "createdAt"
     | "startedAt"
     | "finishedAt"
-  >,
+    | "launchBaseCommit"
+  > & { launchBaseCommit?: string | null },
 ): WorkflowRunRow {
   const id = `wfr_${randomUUID()}`;
   const now = Date.now();
@@ -262,14 +338,14 @@ export function createRun(
        origin_model, origin_reasoning_level, origin_permission_mode,
        name, source, source_hash,
        args_json, settings_json, status, resumed_from_run_id,
-       replay_safety_version, created_at
+       replay_safety_version, created_at, launch_base_commit
      ) VALUES (
        @id, @projectId, @originThreadId, @environmentId, @originProvider,
        @originModel, @originReasoningLevel, @originPermissionMode,
        @name, @source, @sourceHash,
-       @argsJson, @settingsJson, 'queued', @resumedFromRunId, 1, @now
+       @argsJson, @settingsJson, 'queued', @resumedFromRunId, 1, @now, @launchBaseCommit
      )`,
-  ).run({ id, now, ...input });
+  ).run({ id, now, launchBaseCommit: null, ...input });
   return getRunRequired(db, id);
 }
 
@@ -493,7 +569,14 @@ export function getCallByChildThread(
   threadId: string,
 ): WorkflowCallRow | null {
   return optionalCall(
-    db.prepare(`${CALL_SELECT} WHERE child_thread_id = ?`).get(threadId),
+    db
+      .prepare(
+        `${CALL_SELECT} WHERE child_thread_id = ?
+         ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+           call_index DESC
+         LIMIT 1`,
+      )
+      .get(threadId),
   );
 }
 
@@ -597,6 +680,7 @@ export function startCall(
        resolved_permission_mode = excluded.resolved_permission_mode,
        status = excluded.status,
        child_thread_id = NULL, repair_attempts = 0,
+       environment_id = NULL, branch_name = NULL,
        result_json = excluded.result_json, error = NULL,
        replayed_from_call_id = excluded.replayed_from_call_id,
        replay_source = excluded.replay_source,
@@ -635,6 +719,10 @@ export function attachCallThread(
   db: Db,
   callId: string,
   threadId: string,
+  placement: { environmentId: string | null; branchName: string | null; provisionedEnvironment?: boolean } = {
+    environmentId: null,
+    branchName: null,
+  },
 ): boolean {
   db.prepare(`INSERT OR IGNORE INTO workflow_workers(thread_id, run_id, call_id, origin_thread_id)
     SELECT ?, calls.run_id, calls.id, runs.origin_thread_id FROM workflow_calls calls
@@ -646,6 +734,8 @@ export function attachCallThread(
     db
       .prepare(
         `UPDATE workflow_calls SET status = 'running', child_thread_id = ?,
+         environment_id = ?, branch_name = ?,
+         provisioned_environment = ?,
          error = NULL, started_at = ?, last_activity_at = ?
        WHERE id = ? AND status = 'queued'
          AND EXISTS (
@@ -654,8 +744,64 @@ export function attachCallThread(
              AND workflow_runs.status = 'running'
          )`,
       )
-      .run(threadId, Date.now(), Date.now(), callId).changes === 1
+      .run(
+        threadId,
+        placement.environmentId,
+        placement.branchName,
+        placement.provisionedEnvironment === true ? 1 : 0,
+        Date.now(),
+        Date.now(),
+        callId,
+      ).changes === 1
   );
+}
+
+/**
+ * Carry replay identity without transferring destructive ownership. Only the
+ * call that actually provisioned a worktree may authorize its teardown.
+ */
+export function recordCallPlacement(
+  db: Db,
+  callId: string,
+  placement: { environmentId: string | null; branchName: string | null; provisionedEnvironment?: boolean },
+): void {
+  db.prepare(
+    `UPDATE workflow_calls SET environment_id = ?, branch_name = ?,
+       provisioned_environment = CASE WHEN ? IS NULL THEN provisioned_environment ELSE ? END
+     WHERE id = ?`,
+  ).run(
+    placement.environmentId, placement.branchName,
+    placement.provisionedEnvironment === undefined ? null : Number(placement.provisionedEnvironment),
+    placement.provisionedEnvironment === true ? 1 : 0,
+    callId,
+  );
+}
+
+/**
+ * Distinct environments a run provisioned, for teardown after the orchestrator
+ * approves. The run's origin environment is never listed: a run only ever
+ * reuses that one, and destroying it would take the orchestrator with it.
+ */
+export function listRunProvisionedEnvironments(
+  db: Db,
+  runId: string,
+): Array<{ environmentId: string; branchName: string | null }> {
+  return db
+    .prepare(
+      `SELECT DISTINCT calls.environment_id AS environmentId,
+         calls.branch_name AS branchName
+       FROM workflow_calls calls
+       JOIN workflow_runs runs ON runs.id = calls.run_id
+       WHERE calls.run_id = ?
+         AND calls.environment_id IS NOT NULL
+         AND calls.provisioned_environment = 1
+         AND calls.environment_id <> runs.environment_id
+       ORDER BY calls.environment_id`,
+    )
+    .all(runId) as Array<{
+    environmentId: string;
+    branchName: string | null;
+  }>;
 }
 
 export function queueCallProviderRetry(
@@ -908,8 +1054,15 @@ const RETIRED_WORKER_FROM = `FROM workflow_workers workers
     LEFT JOIN workflow_calls calls ON calls.id = workers.call_id
     LEFT JOIN workflow_runs runs ON runs.id = workers.run_id
     WHERE workers.archived_at IS NULL
-      AND (calls.id IS NULL OR calls.status NOT IN ('queued', 'running')
-        OR calls.child_thread_id IS NOT workers.thread_id OR runs.status NOT IN ('queued', 'running'))`;
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_calls active WHERE active.child_thread_id = workers.thread_id
+          AND active.status IN ('queued', 'running')
+      )
+      AND (runs.id IS NULL OR runs.status NOT IN ('queued', 'running')
+        OR calls.id IS NULL OR calls.child_thread_id IS NOT workers.thread_id
+        OR (calls.status NOT IN ('queued', 'running')
+          AND json_extract(calls.options_json, '$.reportIdentity') IS NOT 1
+          AND json_extract(calls.options_json, '$.environment') IS NULL))`;
 
 export function retiredWorkers(
   db: Db,

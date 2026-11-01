@@ -71,6 +71,7 @@ it("removes the worker abort listener after a run finishes", async () => {
     return "done";`,
     args: null,
     resumedFromRunId: null,
+    allowDirty: false,
   });
   const controller = new AbortController();
   const worker = service.runWorker(controller.signal);
