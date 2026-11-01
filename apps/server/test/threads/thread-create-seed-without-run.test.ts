@@ -4,6 +4,7 @@ import {
   getEnvironment,
   getThread,
   listEvents,
+  listQueuedThreadMessages,
 } from "@bb/db";
 import {
   PERSONAL_PROJECT_ID,
@@ -17,7 +18,9 @@ import type { TelemetryService } from "../../src/services/system/telemetry.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
 import { buildExecutionOptions } from "../../src/services/threads/thread-commands.js";
 import { canThreadSpawnChild } from "../../src/services/threads/thread-parent.js";
+import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-request.js";
 import {
+  listQueuedThreadCommands,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
   waitForQueuedCommandAfter,
@@ -56,6 +59,54 @@ function installTelemetryCaptureSpy(harness: TestAppHarness) {
   harness.deps.telemetry = { ...harness.deps.telemetry, capture };
   return capture;
 }
+
+describe("create-only persistent conversations", () => {
+  it("associates an existing environment without dispatch, then starts the same thread on its first real input", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-create-only",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/create-only-project",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/create-only-project",
+      });
+      const thread = await createThreadFromRequest(harness.deps, {
+        environment: { type: "reuse", environmentId: environment.id },
+        input: [],
+        experimental_createOnly: true,
+        origin: "plugin",
+        originPluginId: "orchestrator-test",
+        projectId: project.id,
+        providerId: "codex",
+        startedOnBehalfOf: null,
+        title: "Persistent assistant",
+      });
+      expect(thread.status).toBe("pending");
+      expect(thread.environmentId).toBe(environment.id);
+      expect(thread.originPluginId).toBe("orchestrator-test");
+      expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(0);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(0);
+      expect(listQueuedThreadCommands(harness, "thread.start", thread.id)).toHaveLength(0);
+      expect(listQueuedThreadCommands(harness, "turn.submit", thread.id)).toHaveLength(0);
+      await acceptThreadSendRequest(harness.deps, {
+        thread,
+        payload: { input: textInput("Operator's first question"), mode: "auto" },
+      });
+      const start = await waitForQueuedCommand(
+        harness,
+        ({ command }) => command.type === "thread.start" && command.threadId === thread.id,
+      );
+      if (start.command.type !== "thread.start") throw new Error("Missing first-turn command");
+      expect(start.command.input).toEqual(textInput("Operator's first question"));
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(environment.id);
+    });
+  });
+});
 
 describe("thread creation telemetry", () => {
   it("captures initial user messages", async () => {

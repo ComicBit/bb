@@ -31,6 +31,7 @@ interface DispatchTurnDuringReprovisionArgs {
   environment: EnvironmentRow;
   execution: ResolvedThreadExecutionOptions;
   initiator: ThreadTurnInitiator;
+  provenance?: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   input: PromptInput[];
   inputGroups?: PromptInput[][];
   senderThreadId: string | null;
@@ -83,6 +84,7 @@ export async function dispatchTurnDuringReprovision(
       environment: args.environment,
       execution: args.execution,
       initiator: args.initiator,
+      provenance: args.provenance,
       input: args.input,
       inputGroups: args.inputGroups,
       senderThreadId: args.senderThreadId,

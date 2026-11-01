@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   PLUGIN_CLI_OUTPUT_MAX_BYTES,
   type BbPluginApi,
+  type ExperimentalRecoverySnapshot,
   type PluginAgentConfigurationContext,
 } from "../../backend-contract.js";
 import { defineRpcContract } from "../../rpc-contract.js";
@@ -1165,10 +1166,10 @@ describe("sdk", () => {
         {
           sourceThreadId: "legacy",
           origin: "plugin",
-          originPluginId: "legacy-plugin",
+          originPluginId: "active-plugin",
         },
       ],
-      [{ sourceThreadId: "sdk", origin: "sdk" }],
+      [{ sourceThreadId: "sdk", origin: "plugin", originPluginId: "active-plugin" }],
     ]);
   });
 
@@ -1187,6 +1188,7 @@ describe("sdk", () => {
     await expect(bb.sdk.plugins.catalog.status()).resolves.toEqual(catalog);
     expect(harness.sdk.callsTo("plugins.catalog.status")).toEqual([[]]);
   });
+
 
   it("throws a stub-naming error for unstubbed methods and accepts late stubs", async () => {
     const { bb, harness } = createFakePluginHost();
@@ -2057,6 +2059,69 @@ describe("experimental_aiServices.register", () => {
     ).toThrow(/already registered/u);
   });
 });
+
+describe("experimental native recovery and targeted completion", () => {
+  const snapshot: ExperimentalRecoverySnapshot = {
+    threadId: "thread", projectId: "project", revision: "revision", eventSequence: 2,
+    status: "idle", providerId: "codex", hostId: "host", hostOnline: true,
+    visibility: "visible", parentThreadId: null, archivedAt: null, deletedAt: null,
+    pluginMetadata: {}, metadataReadable: true,
+    run: { requestId: "request", requestSequence: 1, initiator: "user", provenance: "fresh-user", freshUserRequestId: "request", freshUserSequence: 1 },
+    stop: null, finalAssistant: { messageId: "assistant", revision: 2, text: "I will continue next." },
+    queuedMessageCount: 0, pendingInteractionCount: 0, activeBackgroundTaskCount: 0,
+  };
+
+  it("delegates native snapshots and live final policy without replacing the token", async () => {
+    const { bb } = createFakePluginHost({
+      experimental_recovery: {
+        snapshot: () => snapshot,
+        continue: async (args) => {
+          expect(args.snapshot).toBe(snapshot);
+          return args.admit() ? { admitted: true, reason: "admitted" } : { admitted: false, reason: "policy" };
+        },
+      },
+    });
+    expect(bb.experimental_recovery.snapshot({ threadId: "thread" })).toBe(snapshot);
+    expect(await bb.experimental_recovery.continue({ snapshot, admit: () => false })).toEqual({ admitted: false, reason: "policy" });
+  });
+
+  it("rechecks plugin disposal at final native admission after asynchronous preparation", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const { bb, harness } = createFakePluginHost({
+      experimental_recovery: {
+        snapshot: () => snapshot,
+        continue: async (args) => {
+          await gate;
+          return args.admit() ? { admitted: true, reason: "admitted" } : { admitted: false, reason: "policy" };
+        },
+      },
+    });
+    const pending = bb.experimental_recovery.continue({ snapshot, admit: () => true });
+    await harness.dispose();
+    release();
+    expect(await pending).toEqual({ admitted: false, reason: "policy" });
+  });
+
+  it("forwards exact targeted completion input and only returned provider metadata", async () => {
+    const input = { hostId: "host", serviceId: "codex", model: "gpt-5.5", reasoningEffort: "none" as const, serviceTier: "fast" as const, prompt: "Classify", timeoutMs: 1_000 };
+    const { bb } = createFakePluginHost({
+      experimental_completeAi: async (received) => {
+        expect(received).toBe(input);
+        return { text: "unfinished", usage: { inputTokens: 4 }, serviceTier: "priority" };
+      },
+    });
+    expect(await bb.experimental_aiServices.complete(input)).toEqual({ text: "unfinished", usage: { inputTokens: 4 }, serviceTier: "priority" });
+  });
+
+  it("refuses unsupported injected capabilities instead of fabricating results", async () => {
+    const { bb } = createFakePluginHost();
+    expect(() => bb.experimental_recovery.snapshot({ threadId: "thread" })).toThrow(/unavailable/u);
+    await expect(bb.experimental_recovery.verifySafeguards()).rejects.toThrow(/verification is unavailable/u);
+    expect(() => bb.experimental_aiServices.complete({ hostId: "host", serviceId: "codex", model: "gpt-5.5", reasoningEffort: "none", prompt: "Classify", timeoutMs: 1_000 })).toThrow(/unavailable/u);
+  });
+});
+
 
 describe("environment targets", () => {
   it("accepts legacy environment declarations without presentation fields", () => {

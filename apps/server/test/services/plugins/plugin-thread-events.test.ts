@@ -9,13 +9,18 @@ import { applyLoggedThreadLifecycleEvent } from "../../../src/services/threads/l
 import { beginProjectDeletion } from "../../../src/services/projects/project-deletion.js";
 import { createThreadRecord } from "../../../src/services/threads/thread-create-helpers.js";
 import type { ThreadCreateServiceRequest } from "../../../src/services/threads/thread-create-request.js";
+import { appendClientTurnEvent } from "../../../src/services/threads/thread-events.js";
+import type { ExperimentalRecoverySnapshot } from "@get-bb/plugin-sdk";
+import * as threadCommands from "../../../src/services/threads/thread-commands.js";
 import {
   seedEvent,
   seedThreadFixture,
+  seedThreadRuntimeState,
   seedTurnStarted,
   seedThread,
 } from "../../helpers/seed.js";
 import { createUserQuestionPayload } from "../../helpers/pending-interactions.js";
+import { textInput } from "../../helpers/prompt-input.js";
 import {
   createTestAppHarness,
   testLogger,
@@ -89,6 +94,94 @@ function lifecycleDeps(harness: TestAppHarness) {
 }
 
 describe("plugin thread lifecycle events", () => {
+  it("captures active run identity before deferred delivery even when a newer run already exists", async () => {
+    const recorded: Array<{ experimental_recoverySnapshot: ExperimentalRecoverySnapshot | null }> = [];
+    globals.__eagerRecoveryEvents = recorded;
+    const { harness, cleanup } = await setUpPluginHarness(`
+      import type { BbPluginApi } from "@get-bb/plugin-sdk";
+      export default function plugin(bb: BbPluginApi) {
+        bb.events.on("thread.active", (payload) => {
+          const target: unknown = Reflect.get(globalThis, "__eagerRecoveryEvents");
+          if (!Array.isArray(target)) throw new Error("Missing eager recovery collector");
+          target.push(payload);
+        });
+      }
+    `);
+    try {
+      const { thread } = seedThreadFixture(harness, { thread: { status: "starting" } });
+      const append = () => appendClientTurnEvent(harness.deps, {
+        threadId: thread.id, environmentId: thread.environmentId,
+        type: "client/turn/requested", input: textInput("Fresh work"),
+        target: { kind: "new-turn" },
+        execution: { model: "gpt-5", reasoningLevel: "medium", permissionMode: "full", serviceTier: "default", source: "client/turn/requested" },
+        initiator: "user", provenance: "fresh-user", senderThreadId: null,
+        requestMethod: "turn/start", source: "tell",
+      });
+      const first = append();
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.started" } }).applied).toBe(true);
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.succeeded" } }).applied).toBe(true);
+      const newer = append();
+      expect(applyLoggedThreadLifecycleEvent(lifecycleDeps(harness), { threadId: thread.id, event: { type: "run.started" } }).applied).toBe(true);
+      await vi.waitFor(() => expect(recorded).toHaveLength(2));
+      expect(recorded[0]?.experimental_recoverySnapshot?.run?.requestId).toBe(first.requestId);
+      expect(recorded[0]?.experimental_recoverySnapshot?.status).toBe("active");
+      expect(recorded[1]?.experimental_recoverySnapshot?.run?.requestId).toBe(newer.requestId);
+    } finally {
+      delete globals.__eagerRecoveryEvents;
+      await cleanup();
+    }
+  });
+
+  it("rechecks disabled plugin state inside final native continuation admission", async () => {
+    const { harness, cleanup } = await setUpPluginHarness(`export default function plugin() {}`);
+    let release!: () => void;
+    let preparation: { mockRestore(): void } | undefined;
+    try {
+      const { thread, environment } = seedThreadFixture(harness, { thread: { status: "idle" } });
+      seedThreadRuntimeState(harness.deps, { threadId: thread.id, environmentId: environment.id, providerThreadId: "provider-recovery" });
+      const request = appendClientTurnEvent(harness.deps, {
+        threadId: thread.id, environmentId: environment.id,
+        type: "client/turn/requested", source: "tell", requestMethod: "turn/start",
+        input: textInput("Finish work"), target: { kind: "new-turn" },
+        execution: { model: "gpt-5", reasoningLevel: "medium", serviceTier: "default", permissionMode: "full", source: "client/turn/requested" },
+        initiator: "user", provenance: "fresh-user", senderThreadId: null,
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id, providerThreadId: "provider-recovery",
+        type: "turn/input/accepted", scope: turnScope(`turn-${request.sequence}`),
+        sequence: getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+        data: { clientRequestId: request.requestId },
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id, providerThreadId: "provider-recovery", type: "item/completed", scope: turnScope(`turn-${request.sequence}`),
+        sequence: getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+        data: { item: { type: "agentMessage", id: "assistant-recovery", text: "I will continue next." } },
+      });
+      const api = harness.pluginService.getApi("observer")!;
+      const snapshot = api.experimental_recovery.snapshot({ threadId: thread.id })!;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const original = threadCommands.prepareTurnSubmitCommandPayload;
+      preparation = vi.spyOn(threadCommands, "prepareTurnSubmitCommandPayload").mockImplementationOnce(async (...args) => {
+        const result = await original(...args);
+        entered();
+        await gate;
+        return result;
+      });
+      const pending = api.experimental_recovery.continue({ snapshot, admit: () => true });
+      await ready;
+      await harness.pluginService.setEnabled("observer", false);
+      release();
+      expect(await pending).toEqual({ admitted: false, reason: "policy" });
+    } finally {
+      release?.();
+      preparation?.mockRestore();
+      await cleanup();
+    }
+  });
+
+
   it("delivers thread.active once when run.started enters active", async () => {
     const recorded: RecordedThreadPayload[] = [];
     globals.__activeEvents = recorded;

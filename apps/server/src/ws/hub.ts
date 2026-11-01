@@ -218,6 +218,7 @@ export class HostOnlineRpcUnavailableError extends Error {
 }
 
 export class NotificationHub implements DbNotifier {
+  private readonly threadRevisions = new Map<string, number>();
   private readonly clientKeysBySocket = new Map<HubSocket, Set<string>>();
   private readonly clientSocketsByKey = new Map<string, Set<HubSocket>>();
   private readonly daemonSessions = new Map<
@@ -830,11 +831,16 @@ export class NotificationHub implements DbNotifier {
     return { promise, cancel };
   }
 
+  getThreadRevision(threadId: string): number {
+    return this.threadRevisions.get(threadId) ?? 0;
+  }
+
   notifyThread(
     threadId: string,
     changes: ThreadChangeKind[],
     metadata?: ThreadChangeMetadata,
   ): void {
+    this.threadRevisions.set(threadId, this.getThreadRevision(threadId) + 1);
     if (changes.includes("events-appended")) emitPluginThreadEvents(threadId);
     const message: ThreadChangedMessage = {
       type: "changed",

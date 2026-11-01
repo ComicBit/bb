@@ -279,10 +279,19 @@ export interface PluginThreadEventPayloads {
   /** Fired after a thread row is created. */
   "thread.created": { thread: ThreadResponse };
   /** Fired when a thread transitions into `active`. */
-  "thread.active": { thread: ThreadResponse };
+  "thread.active": {
+    thread: ThreadResponse;
+    /** Immutable native state captured at emission, before deferred handlers run. */
+    experimental_recoverySnapshot?: ExperimentalRecoverySnapshot | null;
+  };
   /** Fired when a thread transitions into `idle`. `lastAssistantText` is
    * assembled the same way GET /threads/:id/output is. */
-  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null };
+  "thread.idle": {
+    thread: ThreadResponse;
+    lastAssistantText: string | null;
+    /** Immutable native state captured at emission, before deferred handlers run. */
+    experimental_recoverySnapshot?: ExperimentalRecoverySnapshot | null;
+  };
   /** Fired when a thread transitions into `error`. `error` is the latest
    * system/error event message, when one exists. */
   "thread.failed": { thread: ThreadResponse; error: string | null };
@@ -1896,6 +1905,16 @@ export interface PluginAiCompleteOptions {
    * and commit messages) or the request was cancelled. Pass it to `fetch`.
    */
   readonly signal: AbortSignal;
+  /** Explicit host and model for a plugin's targeted inference call. */
+  readonly experimental_hostId?: string;
+  readonly experimental_model?: string;
+  readonly experimental_reasoningEffort?: "none" | "medium";
+  readonly experimental_serviceTier?: "default" | "fast";
+  readonly experimental_timeoutMs?: number;
+  /** Report only metadata actually returned by the inference service. */
+  readonly experimental_reportResult?: (
+    metadata: ExperimentalAiCompletionMetadata,
+  ) => void;
 }
 
 /** Options for one `transcribe` call. */
@@ -1962,6 +1981,114 @@ export interface PluginAiServiceDeclaration {
   readonly status?: () => Promise<PluginAiServiceStatus>;
 }
 
+export interface ExperimentalAiCompletionMetadata {
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    cachedInputTokens?: number;
+    cacheWriteInputTokens?: number;
+    reasoningOutputTokens?: number;
+  };
+  serviceTier?: string;
+}
+
+export interface ExperimentalAiCompletionInput {
+  hostId: string;
+  serviceId: string;
+  model: string;
+  reasoningEffort: "none" | "medium";
+  serviceTier?: "default" | "fast";
+  prompt: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+export interface ExperimentalRecoverySnapshot {
+  threadId: string;
+  projectId: string;
+  revision: string;
+  eventSequence: number;
+  status: ThreadResponse["status"];
+  providerId: string;
+  hostId: string | null;
+  hostOnline: boolean;
+  visibility: "visible" | "hidden";
+  parentThreadId: string | null;
+  archivedAt: number | null;
+  deletedAt: number | null;
+  pluginMetadata: Readonly<Record<string, ReadonlyJsonValue>>;
+  run: {
+    requestId: string;
+    requestSequence: number;
+    initiator: ThreadTurnInitiator;
+    provenance: "fresh-user" | "queued-user" | "plugin" | "agent" | "system" | "unknown";
+    freshUserRequestId: string | null;
+    freshUserSequence: number | null;
+  } | null;
+  stop: { revision: number; requestId: string | null } | null;
+  finalAssistant: { messageId: string; revision: number; text: string } | null;
+  queuedMessageCount: number;
+  pendingInteractionCount: number;
+  activeBackgroundTaskCount: number;
+  metadataReadable: boolean;
+}
+
+export interface ExperimentalRecoveryContinueResult {
+  admitted: boolean;
+  reason: "admitted" | "changed" | "unsafe" | "policy";
+}
+
+/** Source-built native safeguards exercised in an isolated owned process. */
+export interface ExperimentalRecoverySafeguardsReceipt {
+  sourceRevision: string;
+  runtimeVersion: string;
+  exercisedAt: number;
+  checks: Array<{ id: string; passed: boolean; witness: string }>;
+  cleanup: { passed: boolean; witness: string };
+  lifecycle: {
+    startup: {
+      idle: ExperimentalRecoverySnapshot;
+      active: ExperimentalRecoverySnapshot;
+      ended: ExperimentalRecoverySnapshot;
+    };
+    eager: {
+      active: ExperimentalRecoverySnapshot;
+      ended: ExperimentalRecoverySnapshot;
+      superseded: ExperimentalRecoverySnapshot;
+    };
+    dedup: {
+      active: ExperimentalRecoverySnapshot;
+      ended: ExperimentalRecoverySnapshot;
+      revised: ExperimentalRecoverySnapshot;
+    };
+  };
+}
+
+export interface ExperimentalRecovery {
+  /** Read native run provenance and current safety state; no historical inference. */
+  snapshot(args: { threadId: string }): ExperimentalRecoverySnapshot | null;
+  /**
+   * Admit only the fixed "please continue" prompt against an unchanged, safe
+   * snapshot. `admit` runs synchronously in the final append transaction after
+   * asynchronous preparation, and must recheck the caller's live policy.
+   * This call never queues a continuation.
+   */
+  continue(args: {
+    snapshot: ExperimentalRecoverySnapshot;
+    admit: () => boolean;
+  }): Promise<ExperimentalRecoveryContinueResult>;
+  /**
+   * Run fixed native SQLite, admission and lifecycle safeguards in a separate
+   * owned process, never against live user threads or runtime module globals.
+   * Requires the source-built native fixture runner; no proof or paths accepted.
+   * Settles only after child and owned-resource cleanup, including on abort.
+   */
+  verifySafeguards(args?: {
+    signal?: AbortSignal;
+  }): Promise<ExperimentalRecoverySafeguardsReceipt>;
+}
+
 export interface PluginAiServices {
   /**
    * Register an AI service. Call during the factory; the registration lands
@@ -1969,6 +2096,10 @@ export interface PluginAiServices {
    * when this plugin already registered the id.
    */
   register(declaration: PluginAiServiceDeclaration): { dispose(): void };
+  /** Call the unique registered inference service on an explicit host; no fallback. */
+  complete(
+    input: ExperimentalAiCompletionInput,
+  ): Promise<{ text: string } & ExperimentalAiCompletionMetadata>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2095,6 +2226,8 @@ export interface BbPluginApi {
    * reason, or refuse.
    */
   readonly experimental_hooks: PluginHooks;
+  /** Native recovery observation and atomic continuation admission. */
+  readonly experimental_recovery: ExperimentalRecovery;
   /**
    * Environment targets: places a thread can run that this plugin
    * provisions (plans/plugin-environment-providers.md). Experimental: see

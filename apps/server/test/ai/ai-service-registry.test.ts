@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createAiServiceRegistry,
+  completeRegisteredAiService,
   type AiServiceRegistration,
 } from "../../src/services/ai/ai-service-registry.js";
 
@@ -120,5 +121,63 @@ describe("AI service registry", () => {
     registration.dispose();
     expect(onStatusChange).toHaveBeenCalledTimes(4);
     expect(registry.get(ACME)).toBeNull();
+  });
+});
+
+describe("targeted registered inference", () => {
+  const input = {
+    hostId: "host-cassidy",
+    serviceId: "codex",
+    model: "gpt-5.4",
+    reasoningEffort: "medium" as const,
+    serviceTier: "fast" as const,
+    prompt: "Classify this final message",
+    timeoutMs: 30_000,
+  };
+
+  it("forwards exact settings to the registered owner and returns only reported usage", async () => {
+    const registry = createAiServiceRegistry();
+    const complete: NonNullable<AiServiceRegistration["complete"]> = vi.fn(async (_prompt, options) => {
+      options.experimental_reportResult?.({ usage: { inputTokens: 13, cachedInputTokens: 8 }, serviceTier: "default" });
+      return "{\"unfinished\":true}";
+    });
+    registry.register({ ...service(null, "codex", "provider-codex"), complete });
+    expect(await completeRegisteredAiService(registry, input)).toEqual({
+      text: "{\"unfinished\":true}", usage: { inputTokens: 13, cachedInputTokens: 8 }, serviceTier: "default",
+    });
+    expect(complete).toHaveBeenCalledWith(input.prompt, expect.objectContaining({
+      experimental_hostId: input.hostId, experimental_model: input.model,
+      experimental_reasoningEffort: "medium", experimental_serviceTier: "fast",
+      experimental_timeoutMs: 30_000, signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it("rejects missing or ambiguous service owners instead of choosing a fallback", async () => {
+    const registry = createAiServiceRegistry();
+    await expect(completeRegisteredAiService(registry, input)).rejects.toThrow("not registered");
+    registry.register(service(null, "codex", "first-provider"));
+    registry.register(service(null, "codex", "second-provider"));
+    await expect(completeRegisteredAiService(registry, input)).rejects.toThrow("ambiguous");
+  });
+
+  it("leaves missing usage and service tier absent", async () => {
+    const registry = createAiServiceRegistry();
+    registry.register(service(null, "codex", "provider-codex"));
+    expect(await completeRegisteredAiService(registry, input)).toEqual({ text: "reply" });
+  });
+
+  it("rejects cancellation even when the registered callback ignores its signal", async () => {
+    const registry = createAiServiceRegistry();
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    registry.register({ ...service(null, "codex", "provider-codex"), complete: async () => {
+      entered();
+      return new Promise<string>(() => {});
+    } });
+    const controller = new AbortController();
+    const pending = completeRegisteredAiService(registry, { ...input, signal: controller.signal });
+    await ready;
+    controller.abort(new Error("classification cancelled"));
+    await expect(pending).rejects.toThrow("classification cancelled");
   });
 });

@@ -1,6 +1,7 @@
 import {
   appendStoredThreadEventsInTransaction,
   createEventId,
+  events,
   getActiveStoredTurnId,
   getLastStoredProviderThreadId,
   getLastStoredTurnRequestEvent,
@@ -15,6 +16,7 @@ import {
 import {
   CLIENT_TURN_REQUEST_ID_ALPHABET,
   CLIENT_TURN_REQUEST_ID_SUFFIX_LENGTH,
+  NATIVE_RECOVERY_STOP_OPERATION,
   encodeClientTurnRequestIdAlphabetIndexes,
   getThreadEventScopeTurnId,
   isStandaloneBuiltinCompactCommand,
@@ -24,7 +26,8 @@ import {
   turnRequestEventDataSchema,
   WORKSPACE_PROVISIONING_STEP_KEYS,
 } from "@bb/domain";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type {
   ClientTurnRequestId,
   ClientTurnLifecycleEventData,
@@ -82,6 +85,7 @@ interface ClientTurnRequestedEventArgs {
   environmentId: string | null;
   execution: ResolvedThreadExecutionOptions;
   initiator: ThreadTurnInitiator;
+  provenance?: TurnRequestEventData["provenance"];
   input: PromptInput[];
   inputGroups?: PromptInput[][];
   requestMethod: "thread/start" | "turn/start";
@@ -200,6 +204,7 @@ function buildClientTurnRequestedEventData(
   return {
     ...buildClientTurnBaseEventData(args),
     requestId,
+    ...(args.provenance !== undefined ? { provenance: args.provenance } : {}),
     ...(args.retryOf !== undefined
       ? {
           retryOfRequestId: args.retryOf.requestId,
@@ -720,6 +725,42 @@ export function appendThreadInterruptedEventInTransaction(
       reason: args.reason,
     },
   });
+}
+
+
+export function recordNativeRecoveryStop(
+  deps: Pick<AppDeps, "db" | "hub">,
+  threadId: string,
+): void {
+  const appended = deps.db.transaction((tx) => {
+    if (!getThread(tx, threadId)) return false;
+    const row = tx.select({ data: events.data, sequence: events.sequence }).from(events).where(and(
+      eq(events.threadId, threadId),
+      eq(events.type, "client/turn/requested"),
+      sql`json_extract(${events.data}, '$.target.kind') IN ('thread-start', 'new-turn')`,
+    )).orderBy(desc(events.sequence)).limit(1).get();
+    const stopped = tx.select({ sequence: events.sequence }).from(events).where(and(
+      eq(events.threadId, threadId),
+      eq(events.type, "system/operation"),
+      sql`json_extract(${events.data}, '$.operation') = ${NATIVE_RECOVERY_STOP_OPERATION}`,
+    )).orderBy(desc(events.sequence)).limit(1).get();
+    if (stopped && (row?.sequence ?? -1) <= stopped.sequence) return false;
+    const request = row ? turnRequestEventDataSchema.parse(JSON.parse(row.data)) : null;
+    appendThreadEventInTransaction(tx, {
+      threadId,
+      type: "system/operation",
+      scope: threadScope(),
+      data: {
+        operation: NATIVE_RECOVERY_STOP_OPERATION,
+        status: "completed",
+        message: "Automatic continuation stopped by user request",
+        operationId: randomUUID(),
+        metadata: { requestId: request?.requestId ?? null },
+      },
+    });
+    return true;
+  }, { behavior: "immediate" });
+  if (appended) deps.hub.notifyThread(threadId, ["events-appended"], { eventTypes: ["system/operation"] });
 }
 
 function resolveThreadOwnershipChangeAction(

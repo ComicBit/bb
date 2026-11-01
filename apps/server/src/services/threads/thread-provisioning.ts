@@ -56,6 +56,7 @@ import { recordAcceptedPromptHistoryEntry } from "../prompt-history.js";
 interface RequestThreadProvisionArgs {
   environmentIntent: ThreadProvisionEnvironmentIntent;
   execution: ResolvedThreadExecutionOptions;
+  provenance?: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   fork: ThreadForkDescriptor | null;
   input: PromptInput[];
   providerInput?: PromptInput[];
@@ -71,6 +72,7 @@ interface RequestThreadTargetReprovisionArgs {
   input: PromptInput[];
   inputGroups?: PromptInput[][];
   initiator: ThreadTurnInitiator;
+  provenance?: RequestThreadProvisionArgs["provenance"];
   senderThreadId: string | null;
   systemMessageKind?: SystemMessageKind;
   systemMessageSubject?: SystemMessageSubject | null;
@@ -287,11 +289,13 @@ export function requestThreadProvision(
   args: RequestThreadProvisionArgs,
 ): ThreadProvisionContext {
   return deps.db.transaction(() => {
-    const { initiator, senderThreadId } = resolveDispatchAuthor({
+    const { initiator: resolvedInitiator, senderThreadId } = resolveDispatchAuthor({
       retrying: false,
       senderThreadId: null,
       startedOnBehalfOf: args.startedOnBehalfOf,
     });
+    const initiator = args.provenance === "plugin" || args.provenance === "system"
+      ? "system" : resolvedInitiator;
     const target: TurnRequestTarget = { kind: "thread-start" };
     const request = appendClientTurnEvent(deps, {
       threadId: args.thread.id,
@@ -300,6 +304,7 @@ export function requestThreadProvision(
       input: args.input,
       execution: args.execution,
       initiator,
+      provenance: args.provenance,
       senderThreadId,
       requestMethod: "thread/start",
       source: "spawn",
@@ -440,6 +445,7 @@ function appendReprovisionTurnRequest(
               : {}),
             execution: args.execution,
             initiator: args.initiator,
+            provenance: args.provenance,
             senderThreadId: args.senderThreadId,
             systemMessageKind: args.systemMessageKind,
             systemMessageSubject: args.systemMessageSubject,

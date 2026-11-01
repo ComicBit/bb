@@ -13,11 +13,13 @@ Spawning:
 
   bb thread spawn --project <id> --prompt "..." [options]
   bb thread spawn --project <id> --prompt-file <path> [options]
+  bb thread spawn --project <id> --create-only [options]
 
-    --prompt <prompt>              Initial prompt (one of --prompt or --prompt-file is required)
+    --prompt <prompt>              Initial prompt (one of --prompt or --prompt-file is required unless --create-only)
     --prompt-file <path>           Read the prompt from a file; `-` reads stdin. Use this for
                                    multi-line or Markdown prompts: inside double quotes the shell
                                    runs `backticks` and $(...) before bb sees them
+    --create-only                 Create an empty pending conversation without provider dispatch or provisioning
     --title <title>                Thread title
     --project <id>                 Project (required; when omitted the error prints this thread's project ID to add)
     --parent-thread <id>           Parent thread (may be in another project)
@@ -58,6 +60,14 @@ Spawning:
     --origin-kind <kind>           Create a fork thread
     --source-thread <id>           Source thread for a fork
     --source-seq-end <seq>         Fork after the source turn containing this event sequence
+
+  --create-only keeps the selected provider, existing environment and startup
+  context on one durable pending thread. A later `bb thread tell` starts that
+  same conversation. It cannot include a prompt, attachment, --plan, fork or
+  --send-at or execution defaults (--model, --reasoning-level, --service-tier,
+  --permission-mode); select execution on the first real message. SDK callers
+  use `threads.spawn({ ..., input: [], experimental_createOnly: true })`;
+  ordinary spawning is unchanged.
 
   Execution defaults resolve from explicit flags, live parent execution, and
   remembered project defaults. With no remembered model, bb uses the explicitly

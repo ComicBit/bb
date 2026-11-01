@@ -89,6 +89,7 @@ type SendThreadMessagePayload = SendMessageRequest & {
 
 interface SendThreadMessageArgs {
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
+  provenance?: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   /**
    * Present only when this send re-submits a failed turn. Marks the turn event
    * as attempt N of an earlier request, which is what makes the next failure's
@@ -151,6 +152,7 @@ interface AppendAndQueueSendThreadMessageArgs {
   environmentId: string | null;
   execution: ResolvedThreadExecutionOptions;
   initiator: ThreadTurnInitiator;
+  provenance?: SendThreadMessageArgs["provenance"];
   input: PromptInput[];
   inputGroups?: PromptInput[][];
   queueInTransaction: SendThreadMessageQueueRequest;
@@ -403,6 +405,7 @@ function appendAndQueueSendThreadMessageInTransaction({
   environmentId,
   execution,
   initiator,
+  provenance,
   input,
   inputGroups,
   queueInTransaction,
@@ -428,6 +431,7 @@ function appendAndQueueSendThreadMessageInTransaction({
             ...(inputGroups !== undefined ? { inputGroups } : {}),
             execution,
             initiator,
+            provenance,
             senderThreadId,
             requestMethod: "turn/start",
             source: "tell",
@@ -547,11 +551,14 @@ async function sendThreadMessageWithoutContextClear(
   // `system` whatever the original was: nobody asked for it a second time, and
   // counting it as a user message would inflate every "messages sent" figure by
   // however many times the provider happened to be rate limited.
-  const { initiator } = resolveDispatchAuthor({
-    retrying: args.retryOf !== undefined,
-    senderThreadId,
-    startedOnBehalfOf: null,
-  });
+  const initiator: ThreadTurnInitiator =
+    args.provenance === "system" || args.provenance === "plugin"
+      ? "system"
+      : resolveDispatchAuthor({
+          retrying: args.retryOf !== undefined,
+          senderThreadId,
+          startedOnBehalfOf: null,
+        }).initiator;
   const shouldCaptureUserMessageSent =
     args.trigger === "user" && initiator === "user" && input.length > 0;
   const expectedSteerTurnId =
@@ -561,7 +568,7 @@ async function sendThreadMessageWithoutContextClear(
   // A retry's model is provenance — the failed attempt's tuple, replayed —
   // not a fresh model choice, so it must not rewrite the thread's sticky
   // override the way an explicit user send's model does.
-  if (senderThreadId === null && args.retryOf === undefined) {
+  if (senderThreadId === null && args.retryOf === undefined && args.provenance !== "system") {
     await recoverThreadModelOverride(deps, {
       model: payload.model,
       modelSource:
@@ -595,6 +602,7 @@ async function sendThreadMessageWithoutContextClear(
       environment,
       execution,
       initiator,
+      provenance: args.provenance,
       input,
       inputGroups,
       senderThreadId,
@@ -675,6 +683,7 @@ async function sendThreadMessageWithoutContextClear(
       environmentId: thread.environmentId,
       execution,
       initiator,
+      provenance: args.provenance,
       input,
       inputGroups,
       queueInTransaction: ({ tx }) => {
@@ -768,6 +777,7 @@ async function sendThreadMessageWithoutContextClear(
     environmentId: thread.environmentId,
     execution,
     initiator,
+    provenance: args.provenance,
     input,
     inputGroups,
     queueInTransaction: () => {

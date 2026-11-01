@@ -556,6 +556,7 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
         environmentId: thread.environmentId,
         execution,
         initiator,
+        provenance: initiator === "user" ? "queued-user" : "agent",
         input,
         ...(inputGroups.length > 1 ? { inputGroups } : {}),
         requestMethod: "turn/start",

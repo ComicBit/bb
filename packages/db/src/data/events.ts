@@ -35,6 +35,7 @@ import type {
 } from "@bb/domain";
 import {
   LOCAL_AGENT_TASK_TYPE,
+  NATIVE_RECOVERY_STOP_OPERATION,
   LOCAL_BASH_TASK_TYPE,
   LOCAL_SUBAGENT_TASK_TYPE,
   LOCAL_WORKFLOW_TASK_TYPE,
@@ -330,6 +331,7 @@ export function deleteThreadEventSuffixInTransaction(
         eq(events.threadId, args.threadId),
         gte(events.sequence, args.cutoffSequence),
         lte(events.sequence, args.oldMaxSequence),
+        sql`(${events.type} <> 'system/operation' OR COALESCE(json_extract(${events.data}, '$.operation'), '') <> ${NATIVE_RECOVERY_STOP_OPERATION})`,
       ),
     )
     .run();

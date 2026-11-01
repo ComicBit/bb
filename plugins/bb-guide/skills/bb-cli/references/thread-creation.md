@@ -10,6 +10,14 @@
   current thread's project ID to add. Omitted execution flags use remembered project defaults;
   without a remembered model, bb resolves the selected provider and its reported
   default model on the target machine.
+- Create a persistent empty conversation without starting its provider using
+  `bb thread spawn --project ID --create-only --environment ENV_ID --title NAME`.
+  It retains the existing environment and stays pending with no queued input
+  or provider dispatch. The first later `bb thread tell` starts that same thread.
+  Do not combine create-only with prompts, attachments, plans, forks, schedules
+  or execution defaults; select model, reasoning, tier and permission on the
+  first actual `thread tell`, not while creating an empty conversation.
+  SDK callers pass `input: []` and `experimental_createOnly: true` to `threads.spawn`.
 - Select a target with `--environment`, `--new-environment`, `--base-branch`,
   or `--machine`. Select execution with `--provider`, `--model`,
   `--reasoning-level`, `--service-tier`, and `--permission-mode`. A service

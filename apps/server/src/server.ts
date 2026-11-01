@@ -57,6 +57,8 @@ import {
 import { setPluginMachineProviderBridge } from "./services/plugins/plugin-machine-provider-registry.js";
 import { invalidateEnvironmentProviderMachineAvailability } from "./services/environments/provider-machine-availability.js";
 import { requestQueuedMessageDispatch } from "./services/threads/queued-message-dispatch.js";
+import { continueRecovery, readRecoverySnapshot } from "./services/threads/thread-recovery.js";
+import { verifyRecoverySafeguards } from "./services/threads/thread-recovery-verification.js";
 import { registerInternalEventRoutes } from "./internal/events.js";
 import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
@@ -748,6 +750,11 @@ export function createApp(
     providerRegistry: deps.providerRegistry,
     pluginHostArtifacts: deps.pluginHostArtifacts,
     aiServices: deps.aiServices,
+    recovery: {
+      snapshot: ({ threadId }) => readRecoverySnapshot(deps, threadId),
+      continue: (args) => continueRecovery(deps, args),
+      verifySafeguards: verifyRecoverySafeguards,
+    },
     ensureSharedPortTunnel: (hostId) =>
       deps.sharedPorts.ensureTunnelIdentity(hostId, () =>
         callHostRetryableOnlineRpcForWork(deps, {

@@ -42,14 +42,6 @@ export interface FakeSdkHarness {
   stub(path: string, implementation: (...args: never[]) => unknown): void;
 }
 
-/**
- * Mirrors the server's `wrapSdkForPlugin` attribution for `threads.spawn` and
- * `threads.fork`. A `pluginMetadata` seed is validated like the real SDK does
- * and always attributes the new thread to the plugin, overriding `origin` and
- * `originPluginId`. Without a seed, `origin` defaults to "plugin" and, for that
- * origin, `originPluginId` defaults to the plugin's id. Throws when the seed is
- * invalid.
- */
 function withThreadAttribution(pluginId: string, args: unknown[]): unknown[] {
   const [first, ...rest] = args;
   if (typeof first !== "object" || first === null) return args;
@@ -69,14 +61,11 @@ function withThreadAttribution(pluginId: string, args: unknown[]): unknown[] {
       ...rest,
     ];
   }
-  const origin = threadArgs.origin ?? "plugin";
   return [
     {
       ...threadArgs,
-      origin,
-      ...(origin === "plugin"
-        ? { originPluginId: threadArgs.originPluginId ?? pluginId }
-        : {}),
+      origin: "plugin",
+      originPluginId: pluginId,
     },
     ...rest,
   ];
@@ -117,6 +106,19 @@ function normalizeCallArgs(
     case "threads.spawn":
     case "threads.fork":
       return withThreadAttribution(pluginId, args);
+    case "threads.send": {
+      const [first, ...rest] = args;
+      if (typeof first !== "object" || first === null) return args;
+      return [{
+        ...first,
+        pluginSubmission: {
+          pluginId,
+          data: "pluginSubmission" in first && typeof first.pluginSubmission === "object" && first.pluginSubmission !== null && "data" in first.pluginSubmission
+            ? first.pluginSubmission.data
+            : null,
+        },
+      }, ...rest];
+    }
     case "threads.getPluginMetadata":
       return withPluginMetadataTarget(pluginId, args, false);
     case "threads.updatePluginMetadata":

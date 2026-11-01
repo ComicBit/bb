@@ -17,6 +17,7 @@ import {
   deletePluginKvValue,
   getPluginKvValue,
   getHost,
+  getInstalledPlugin,
   listPluginKvKeys,
   setPluginKvValue,
   type DbConnection,
@@ -24,6 +25,7 @@ import {
 import type { ThreadEventItemPresentation } from "@bb/domain";
 import type {
   BbPluginApi,
+  ExperimentalRecovery,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
@@ -330,17 +332,6 @@ export type PluginProviderEnvHealthResolver = (
   | null
   | Promise<ExperimentalPluginProviderEnvHealth | null>;
 
-function withPluginThreadAttribution<
-  TArgs extends ThreadForkArgs | ThreadSpawnArgs,
->(args: TArgs, pluginId: string): TArgs {
-  const attribution: Pick<ThreadSpawnArgs, "origin" | "originPluginId"> =
-    args.pluginMetadata !== undefined
-      ? { origin: "plugin", originPluginId: pluginId }
-      : args.origin === undefined || args.origin === "plugin"
-        ? { origin: "plugin", originPluginId: args.originPluginId ?? pluginId }
-        : { origin: args.origin };
-  return { ...args, ...attribution };
-}
 
 function wrapSdkForPlugin(
   sdk: BbSdk,
@@ -357,6 +348,12 @@ function wrapSdkForPlugin(
     },
     threads: {
       ...sdk.threads,
+      send(args) {
+        return rpcCallerSdk.threads.send({
+          ...args,
+          pluginSubmission: { pluginId, data: args.pluginSubmission?.data ?? null },
+        });
+      },
       async getPluginMetadata(
         args: Omit<ThreadPluginMetadataArgs, "pluginId"> & {
           pluginId?: string;
@@ -378,10 +375,10 @@ function wrapSdkForPlugin(
         });
       },
       fork(args: ThreadForkArgs) {
-        return sdk.threads.fork(withPluginThreadAttribution(args, pluginId));
+        return sdk.threads.fork({ ...args, origin: "plugin", originPluginId: pluginId });
       },
       spawn(args: ThreadSpawnArgs) {
-        return sdk.threads.spawn(withPluginThreadAttribution(args, pluginId));
+        return sdk.threads.spawn({ ...args, origin: "plugin", originPluginId: pluginId });
       },
     },
   };
@@ -472,6 +469,8 @@ export function createPluginApi(options: {
   db: DbConnection;
   dataDir: string;
   getSdk: () => BbSdk | undefined;
+  recovery?: ExperimentalRecovery;
+  completeAi: PluginAiServices["complete"];
   getMachineEnrollments: () => MachineEnrollments;
   getAppUrl: () => string | null;
   getLoopbackBaseUrl: () => string | undefined;
@@ -1307,6 +1306,10 @@ export function createPluginApi(options: {
   });
   const experimental_aiServices: PluginAiServices = {
     register: aiServiceRegistrations.register,
+    complete(input) {
+      assertLive();
+      return options.completeAi(input);
+    },
   };
 
   const api: BbPluginApi = {
@@ -1324,6 +1327,32 @@ export function createPluginApi(options: {
     ui,
     events,
     experimental_hooks,
+    experimental_recovery: {
+      snapshot(args) {
+        assertLive();
+        if (!options.recovery) throw new Error("Native recovery is unavailable in this plugin host");
+        return options.recovery.snapshot(args);
+      },
+      continue(args) {
+        assertLive();
+        if (!options.recovery) throw new Error("Native recovery is unavailable in this plugin host");
+        return options.recovery.continue({
+          snapshot: args.snapshot,
+          admit: () => {
+            if (invalidated || !activated || getInstalledPlugin(db, pluginId)?.enabled !== true) return false;
+            assertLive();
+            return args.admit() === true && !invalidated && getInstalledPlugin(db, pluginId)?.enabled === true;
+          },
+        });
+      },
+      async verifySafeguards(args) {
+        assertLive();
+        if (!options.recovery) throw new Error("Native safeguard verification is unavailable in this plugin host");
+        const receipt = await options.recovery.verifySafeguards(args);
+        assertLive();
+        return receipt;
+      },
+    },
     experimental_environments,
     experimental_machines,
     experimental_serverAccess,

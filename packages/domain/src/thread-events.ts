@@ -18,6 +18,8 @@ import {
   systemMessageSubjectSchema,
   systemThreadInterruptedReasonSchema,
 } from "./system-message.js";
+export const NATIVE_RECOVERY_STOP_OPERATION = "native-recovery-stop";
+
 
 export const systemEventTypeValues = [
   "client/thread/start",
@@ -89,6 +91,7 @@ export const turnRequestEventDataSchema = z.object({
   retryAttempt: z.number().int().min(2).optional(),
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
+  provenance: z.enum(["fresh-user", "queued-user", "plugin", "agent", "system"]).optional(),
   senderThreadId: z.string().nullable(),
   systemMessageKind: systemMessageKindSchema.optional(),
   systemMessageSubject: systemMessageSubjectSchema.nullable().optional(),

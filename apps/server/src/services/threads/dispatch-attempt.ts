@@ -338,6 +338,7 @@ async function runDispatchAttempt(
     senderThreadId,
     startedOnBehalfOf: args.startedOnBehalfOf,
   });
+  const initiator = args.origin === "plugin" || args.pluginSubmission !== null ? "system" : author.initiator;
   const claimed = args.source.kind === "drain" ? args.source.claimed : null;
   const sendNow = args.source.kind === "drain" && args.source.sendNow;
   const respectManualStopPause =
@@ -502,6 +503,16 @@ async function runDispatchAttempt(
         respectManualStopPause,
         startContext: args.startContext ?? retryStartContext,
         thread,
+        provenance:
+          args.retryOf !== undefined
+            ? "system"
+            : args.origin === "plugin" || args.pluginSubmission !== null
+              ? "plugin"
+              : author.initiator !== "user"
+                ? author.initiator
+                : args.source.kind === "drain"
+                  ? "queued-user"
+                  : "fresh-user",
       });
       if (admitted.value === null) {
         const current = getThread(deps.db, thread.id);
@@ -533,7 +544,7 @@ async function runDispatchAttempt(
         payload.executionInputSources ?? {},
       ),
       attempt,
-      initiator: author.initiator,
+      initiator,
       senderThreadId: author.senderThreadId,
       origin: args.origin,
       originPluginId: args.originPluginId,
@@ -598,6 +609,16 @@ async function runDispatchAttempt(
       thread,
       trigger: args.trigger,
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
+      provenance:
+        args.retryOf !== undefined
+          ? "system"
+          : args.pluginSubmission !== null
+            ? "plugin"
+            : author.initiator !== "user"
+              ? author.initiator
+              : args.source.kind === "drain"
+                ? "queued-user"
+                : "fresh-user",
       beforeAppendInTransaction: ({ tx }) => {
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
@@ -677,6 +698,7 @@ interface AdmitPendingThreadArgs {
   claimed: ClaimedQueuedThreadMessageRow[] | null;
   payload: SendMessageRequest & { inputGroups?: PromptInput[][] };
   respectManualStopPause: boolean;
+  provenance: "fresh-user" | "queued-user" | "plugin" | "agent" | "system";
   /** Creation's own record; null on a re-attempt, which reads it back. */
   startContext: PendingThreadStartContext | null;
   thread: Thread;
@@ -762,6 +784,7 @@ async function admitPendingThread(
           thread: starting,
           environmentIntent: startContext.environmentIntent,
           execution,
+          provenance: args.provenance,
           fork: startContext.fork,
           input: args.payload.input,
           ...(startContext.providerInput === undefined
