@@ -3945,6 +3945,72 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).not.toContain("echo:/compact");
   });
 
+  it.each([
+    {
+      name: "OMP's reported post-compaction count",
+      dialectId: "omp",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: false,
+      expected: 26_590,
+    },
+    {
+      name: "structured usage in preference to OMP's prose",
+      dialectId: "omp",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: true,
+      expected: 24_000,
+    },
+    {
+      name: "generic ACP structured usage",
+      dialectId: "generic",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: true,
+      expected: 24_000,
+    },
+    {
+      name: "generic ACP without interpreting OMP's prose",
+      dialectId: "generic",
+      message: "Compaction complete. Tokens: 129966 -> 26590 (saved 103376).",
+      structured: false,
+      expected: null,
+    },
+    {
+      name: "OMP without a usable count",
+      dialectId: "omp",
+      message: "Compaction complete.",
+      structured: false,
+      expected: null,
+    },
+  ])(
+    "refreshes compaction usage from $name",
+    async ({ dialectId, message, structured, expected }) => {
+      const { providerThreadId } = await startThread({
+        dialectId,
+        envVars: {
+          FAKE_ACP_COMPACT_AGENT_MESSAGE: message,
+          FAKE_ACP_COMPACT_USAGE: structured ? "1" : "0",
+        },
+      });
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: compactCommandInput(),
+        }),
+      );
+      expect(await waitForTurnCompleted()).toMatchObject({
+        status: "completed",
+      });
+      const updates = threadEventsOfType("thread/contextWindowUsage/updated");
+      if (expected === null) {
+        expect(updates).toEqual([]);
+      } else {
+        expect(updates).toHaveLength(1);
+        expect(updates[0]).toMatchObject({
+          contextWindowUsage: { usedTokens: expected, estimated: false },
+        });
+      }
+    },
+  );
+
   it("fails the compaction turn legibly when the agent rejects the request", async () => {
     const { providerThreadId } = await startThread({
       envVars: { FAKE_ACP_PROMPT_ERROR: "1" },
@@ -5307,41 +5373,326 @@ describe("acp bridge: busy agents, restored sessions and stop reasons", () => {
     expect(response.result).toMatchObject({ sessionRestorable: true });
   });
 
-  it("does not send the instructions again to a session the agent restored", async () => {
-    const promptLog = join(workspaceDir, "prompts.log");
-    const envVars = {
-      FAKE_ACP_LOAD_SESSION: "1",
-      FAKE_ACP_PROMPT_LOG: promptLog,
-    };
-    const first = await startThread({ envVars, instructions: "Be terse." });
-    await completeTurnWith(
-      first.providerThreadId,
-      "first",
-      executionOptions({}),
-    );
-    await stopThread(first.providerThreadId);
+  describe("instructions delivery across agent restarts and compaction", () => {
+    const instructionsBlock = (text: string): string =>
+      `<system_instructions>\n${text}\n</system_instructions>`;
 
-    const resumeId = sendRequest("thread/resume", {
-      threadId: first.bbThreadId,
-      cwd: workspaceDir,
-      instructionMode: "append",
-      options: executionOptions({
-        instructions: "Be terse.",
-        providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
-      }),
-      providerThreadId: first.providerThreadId,
+    function restoringAgent(promptLog: string): Record<string, string> {
+      return { FAKE_ACP_LOAD_SESSION: "1", FAKE_ACP_PROMPT_LOG: promptLog };
+    }
+
+    async function restoreThread(args: {
+      bbThreadId: string;
+      providerThreadId: string;
+      envVars: Record<string, string>;
+      instructions: string;
+    }): Promise<void> {
+      const resumeId = sendRequest("thread/resume", {
+        threadId: args.bbThreadId,
+        cwd: workspaceDir,
+        instructionMode: "append",
+        options: executionOptions({
+          instructions: args.instructions,
+          providerOptions: {
+            acpLaunchSpec: acpLaunchSpec({ envVars: args.envVars }),
+          },
+        }),
+        providerThreadId: args.providerThreadId,
+      });
+      expect((await waitForResponse(resumeId)).result).toMatchObject({
+        providerThreadId: args.providerThreadId,
+      });
+      bbThreadIdByProviderThreadId.set(args.providerThreadId, args.bbThreadId);
+    }
+
+    async function compact(providerThreadId: string): Promise<void> {
+      const completedBefore = threadEventsOfType("turn/completed").length;
+      const turnId = sendTurnRequest("turn/start", providerThreadId, {
+        input: compactCommandInput(),
+      });
+      expect((await waitForResponse(turnId)).error).toBeUndefined();
+      await waitFor(
+        () => threadEventsOfType("turn/completed")[completedBefore],
+        "compaction turn completion",
+      );
+    }
+
+    it("does not send unchanged instructions again to a session the agent restored", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const first = await startThread({ envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "first",
+        executionOptions({}),
+      );
+      await stopThread(first.providerThreadId);
+
+      await restoreThread({ ...first, envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "second",
+        executionOptions({}),
+      );
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        "second",
+      ]);
     });
-    expect((await waitForResponse(resumeId)).error).toBeUndefined();
-    await completeTurnWith(
-      first.providerThreadId,
-      "second",
-      executionOptions({}),
-    );
 
-    expect(loggedPrompts(promptLog)).toEqual([
-      "<system_instructions>\nBe terse.\n</system_instructions>\nfirst",
-      "second",
-    ]);
+    it("sends the new instructions to a restored session when they changed", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const first = await startThread({ envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "first",
+        executionOptions({}),
+      );
+      await stopThread(first.providerThreadId);
+
+      await restoreThread({ ...first, envVars, instructions: "Be verbose." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "second",
+        executionOptions({}),
+      );
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        `${instructionsBlock("Be verbose.")}\nsecond`,
+      ]);
+    });
+
+    it("sends the instructions again to a session restored after a completed compaction", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const first = await startThread({ envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "first",
+        executionOptions({}),
+      );
+      await compact(first.providerThreadId);
+      await stopThread(first.providerThreadId);
+
+      await restoreThread({ ...first, envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        first.providerThreadId,
+        "second",
+        executionOptions({}),
+      );
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        "/compact",
+        `${instructionsBlock("Be terse.")}\nsecond`,
+      ]);
+    });
+
+    it("sends the instructions to a restored session this bridge never delivered them to", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      nextThreadSerial += 1;
+      const restored = {
+        bbThreadId: `thread-${nextThreadSerial}`,
+        providerThreadId: `session-from-a-previous-bridge-${nextThreadSerial}`,
+      };
+
+      await restoreThread({ ...restored, envVars, instructions: "Be terse." });
+      await completeTurnWith(
+        restored.providerThreadId,
+        "second",
+        executionOptions({}),
+      );
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nsecond`,
+      ]);
+    });
+
+    it("sends the instructions when a new environment rebuilds the agent before the first prompt", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const { providerThreadId } = await startThread({
+        envVars,
+        instructions: "Be terse.",
+      });
+
+      await completeTurnWith(
+        providerThreadId,
+        "first",
+        executionOptions({
+          envVars: { FAKE_ACP_TURN_ENV: "1" },
+          providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+        }),
+      );
+
+      expect(notifications("session/replaced")).toHaveLength(1);
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+      ]);
+    });
+
+    it("sends the instructions with the next prompt after a completed compaction", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      await completeTurnWith(providerThreadId, "first", executionOptions({}));
+      await compact(providerThreadId);
+      await completeTurnWith(providerThreadId, "second", executionOptions({}));
+      await completeTurnWith(providerThreadId, "third", executionOptions({}));
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        "/compact",
+        `${instructionsBlock("Be terse.")}\nsecond`,
+        "third",
+      ]);
+    });
+
+    it("sends instructions a turn changed to the live agent once, and not again when it restarts", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const first = await startThread({ envVars, instructions: "Be terse." });
+      const turn = (text: string, instructions: string) =>
+        completeTurnWith(
+          first.providerThreadId,
+          text,
+          executionOptions({ instructions }),
+        );
+
+      await turn("first", "Be terse.");
+      await turn("second", "Be verbose.");
+      await turn("third", "Be verbose.");
+      await stopThread(first.providerThreadId);
+      await restoreThread({ ...first, envVars, instructions: "Be verbose." });
+      await turn("fourth", "Be verbose.");
+      await turn("fifth", "Be terse.");
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        `${instructionsBlock("Be verbose.")}\nsecond`,
+        "third",
+        "fourth",
+        `${instructionsBlock("Be terse.")}\nfifth`,
+      ]);
+    });
+
+    it("sends the instructions a turn changed when that turn also rebuilds the agent", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const envVars = restoringAgent(promptLog);
+      const { providerThreadId } = await startThread({
+        envVars,
+        instructions: "Be terse.",
+      });
+      await completeTurnWith(providerThreadId, "first", executionOptions({}));
+
+      await completeTurnWith(
+        providerThreadId,
+        "second",
+        executionOptions({
+          instructions: "Be verbose.",
+          envVars: { FAKE_ACP_TURN_ENV: "1" },
+          providerOptions: { acpLaunchSpec: acpLaunchSpec({ envVars }) },
+        }),
+      );
+
+      expect(notifications("session/replaced")).toHaveLength(1);
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        `${instructionsBlock("Be verbose.")}\nsecond`,
+      ]);
+    });
+
+    it("sends the instructions a turn changed again after a completed compaction", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      await completeTurnWith(
+        providerThreadId,
+        "first",
+        executionOptions({ instructions: "Be verbose." }),
+      );
+      await compact(providerThreadId);
+      await completeTurnWith(providerThreadId, "second", executionOptions({}));
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be verbose.")}\nfirst`,
+        "/compact",
+        `${instructionsBlock("Be verbose.")}\nsecond`,
+      ]);
+    });
+
+    it("sends the instructions again after the agent's context usage drops the way its own compaction does", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      const turn = (text: string) =>
+        completeTurnWith(providerThreadId, text, executionOptions({}));
+
+      await turn("first context-used:38130/272000");
+      await turn("second context-used:28578/272000");
+      await turn("third");
+      await turn("fourth");
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst context-used:38130/272000`,
+        "second context-used:28578/272000",
+        `${instructionsBlock("Be terse.")}\nthird`,
+        "fourth",
+      ]);
+    });
+
+    it("does not take a small usage drop or a new context window size for a compaction", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_PROMPT_LOG: promptLog },
+        instructions: "Be terse.",
+      });
+      const turn = (text: string) =>
+        completeTurnWith(providerThreadId, text, executionOptions({}));
+
+      await turn("first context-used:17367/100000");
+      await turn("second context-used:16219/100000");
+      await turn("third context-used:10000/200000");
+      await turn("fourth");
+
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst context-used:17367/100000`,
+        "second context-used:16219/100000",
+        "third context-used:10000/200000",
+        "fourth",
+      ]);
+    });
+
+    it("does not send the instructions again after a compaction the agent refused", async () => {
+      const promptLog = join(workspaceDir, "prompts.log");
+      const { providerThreadId } = await startThread({
+        envVars: {
+          FAKE_ACP_PROMPT_LOG: promptLog,
+          FAKE_ACP_COMPACT_STOP_REASON: "refusal",
+        },
+        instructions: "Be terse.",
+      });
+      await completeTurnWith(providerThreadId, "first", executionOptions({}));
+      await compact(providerThreadId);
+      await completeTurnWith(providerThreadId, "second", executionOptions({}));
+
+      expect(threadEventsOfType("thread/compacted")).toEqual([]);
+      expect(loggedPrompts(promptLog)).toEqual([
+        `${instructionsBlock("Be terse.")}\nfirst`,
+        "/compact",
+        "second",
+      ]);
+    });
   });
 
   it("sends the instructions again when the agent could not restore the session", async () => {

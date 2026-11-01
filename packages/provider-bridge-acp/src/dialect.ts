@@ -31,7 +31,7 @@ export interface AcpDelegationReport {
 }
 
 type AcpCompactionOutcome =
-  | { status: "completed" }
+  | { status: "completed"; usedTokens?: number }
   | { status: "skipped"; detail: string }
   | { status: "failed"; error: string };
 
@@ -386,7 +386,14 @@ export function compactionOutcomeForEndTurn(
   }
   const text = agentMessage.trim();
   if (!OMP_COMPACTION_FAILURE_PATTERN.test(text)) {
-    return { status: "completed" };
+    const match =
+      /^Compaction complete\. Tokens: \d+ -> (\d+) \(saved -?\d+\)\.$/m.exec(
+        text,
+      );
+    const usedTokens = match ? Number(match[1]) : undefined;
+    return usedTokens !== undefined && Number.isSafeInteger(usedTokens)
+      ? { status: "completed", usedTokens }
+      : { status: "completed" };
   }
   return OMP_COMPACTION_NOOP_PATTERN.test(text)
     ? { status: "skipped", detail: text }

@@ -119,7 +119,7 @@ function buildAcpSkillsInstructions(
   ].join("\n");
 }
 
-function buildAcpSessionInstructions(
+export function buildAcpSessionInstructions(
   options: AcpSessionExecutionOptions,
 ): string | undefined {
   const baseInstructions = options.instructions?.trim();

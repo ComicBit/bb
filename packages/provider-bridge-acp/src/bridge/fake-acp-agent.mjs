@@ -104,6 +104,8 @@
  * - "hang-with-open-command"     → start a command, then hang until cancelled
  *                                  without ever closing it (Cursor's shape)
  * - "stop-reason:<reason>"       → end the turn with that stop reason
+ * - "context-used:<used>/<size>" → report that context usage before the turn
+ *                                  ends, like omp after each prompt
  * - "advertise-commands"         → advertise two slash commands, twice
  * - "ask-form"                   → ask a two-field form question
  * - "ask-form-too-large"         → ask a form with more fields than bb shows
@@ -577,6 +579,13 @@ async function handlePrompt(message) {
     if (compactMessage !== undefined) {
       notifyUpdate(messageChunk(compactMessage));
     }
+    if (process.env.FAKE_ACP_COMPACT_USAGE === "1") {
+      notifyUpdate({
+        sessionUpdate: "usage_update",
+        used: 24_000,
+        size: 1_000_000,
+      });
+    }
   } else if (text.includes("request-external-directory-permission")) {
     // opencode's external_directory permission: the running edit tool asks
     // with the generic kind "other", a bare directory title, and
@@ -862,6 +871,14 @@ async function handlePrompt(message) {
 
   if (activePromptId === message.id) {
     activePromptId = null;
+    const scriptedUsage = /context-used:(\d+)\/(\d+)/.exec(text);
+    if (scriptedUsage) {
+      notifyUpdate({
+        sessionUpdate: "usage_update",
+        used: Number(scriptedUsage[1]),
+        size: Number(scriptedUsage[2]),
+      });
+    }
     const scriptedStopReason = /stop-reason:([a-z_]+)/.exec(text)?.[1];
     const stopReason =
       text === "/compact"

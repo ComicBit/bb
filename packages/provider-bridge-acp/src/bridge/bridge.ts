@@ -95,6 +95,7 @@ import {
   buildAcpModelListParams,
   buildAcpModelSelectionParams,
   buildAcpSessionParams,
+  buildAcpSessionInstructions,
   type AcpAgentCommandParam,
   type AcpModelListParams,
   type AcpSessionParams,
@@ -218,6 +219,7 @@ interface AcpThreadSession {
   pendingInstructions: string | undefined;
   activePromptKind: "turn" | "compaction" | "agent" | null;
   compactionAgentMessage: string;
+  compactionUsageReceived: boolean;
   queuedInputs: AcpPendingTurnInput[];
   promptRequestPending: boolean;
   cancelRequested: boolean;
@@ -226,6 +228,7 @@ interface AcpThreadSession {
   loading: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
+  lastUsageUpdate: AcpUsageUpdate | undefined;
   grokContextWindowSize: number | undefined;
   stopping: boolean;
   turnSettled: Promise<void> | undefined;
@@ -268,6 +271,7 @@ function createBridgeAgentConnection(
 }
 
 const bbThreadIdByProviderThreadId = new Map<string, string>();
+const deliveredInstructionsByProviderThreadId = new Map<string, string>();
 const pendingRuntimeRequests = new Map<
   number,
   (response: BridgeJsonRpcResponse) => void
@@ -1855,6 +1859,10 @@ function buildPromptContentBlocks(
   const instructions = session.pendingInstructions;
   if (instructions) {
     session.pendingInstructions = undefined;
+    deliveredInstructionsByProviderThreadId.set(
+      session.providerThreadId,
+      instructions,
+    );
     blocks.push({
       type: "text",
       text: `<system_instructions>\n${instructions}\n</system_instructions>`,
@@ -2455,6 +2463,7 @@ async function startAgentSession(
     pendingInstructions: params.instructions,
     activePromptKind: null,
     compactionAgentMessage: "",
+    compactionUsageReceived: false,
     queuedInputs: [],
     promptRequestPending: false,
     cancelRequested: false,
@@ -2463,6 +2472,7 @@ async function startAgentSession(
     loading: false,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
+    lastUsageUpdate: undefined,
     grokContextWindowSize: undefined,
     stopping: false,
     turnSettled: undefined,
@@ -2621,7 +2631,12 @@ async function startAgentSession(
         configOptions: loadedConfigOptions,
         models: loadedModels,
       };
-      session.pendingInstructions = undefined;
+      if (
+        deliveredInstructionsByProviderThreadId.get(sessionId) ===
+        params.instructions
+      ) {
+        session.pendingInstructions = undefined;
+      }
       await selectAcpNativeModel({
         session,
         sessionId,
@@ -2629,6 +2644,7 @@ async function startAgentSession(
         nativeReasoning: params.nativeReasoning,
       });
       const loadUsageUpdate = session.pendingLoadUsageUpdate;
+      session.lastUsageUpdate = loadUsageUpdate;
       session.loading = false;
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
@@ -3312,6 +3328,13 @@ function reconcileExecutionSettings(
     envVars,
     permissionMode: options.permissionMode,
     workspaceWriteRoots,
+    instructions:
+      options.instructions === undefined
+        ? session.construction.instructions
+        : buildAcpSessionInstructions({
+            ...options,
+            skillRoots: configuredSkillRoots ?? undefined,
+          }),
   };
   const launchModelChanged = !isDeepStrictEqual(
     launchModelSelection(session.construction),
@@ -3448,6 +3471,7 @@ function startCompaction(
   setActivePromptKind(session, "compaction");
   session.awaitingFirstPrompt = false;
   session.compactionAgentMessage = "";
+  session.compactionUsageReceived = false;
   emitForSession(session, ACP_COMPACTION_STARTED_METHOD, {
     threadId: session.bbThreadId,
   });
@@ -3472,18 +3496,36 @@ function startCompaction(
       if (grokUsage !== undefined) {
         emitGrokContextWindow(session, grokUsage.used);
       }
-      finish(
+      const outcome =
         result.stopReason === "end_turn"
           ? compactionOutcomeForEndTurn(
               session.dialect,
               session.compactionAgentMessage,
             )
           : result.stopReason === "cancelled"
-            ? { status: "interrupted" }
-            : {
+            ? ({ status: "interrupted" } as const)
+            : ({
                 status: "failed",
                 error: `Agent stopped compaction: ${result.stopReason}`,
-              },
+              } as const);
+      if (
+        outcome.status === "completed" &&
+        outcome.usedTokens !== undefined &&
+        !session.compactionUsageReceived
+      ) {
+        const cost = session.model.snapshot().usage?.cost ?? undefined;
+        sendThreadDeltas(session.bbThreadId, [
+          {
+            kind: "contextWindow",
+            used: outcome.usedTokens,
+            estimated: false,
+            attach: "open",
+            ...(cost === undefined ? {} : { cost }),
+          },
+        ]);
+      }
+      finish(
+        outcome.status === "completed" ? { status: "completed" } : outcome,
       );
     })
     .catch((error: unknown) => {
@@ -3492,6 +3534,13 @@ function startCompaction(
         error: error instanceof Error ? error.message : String(error),
       });
     });
+}
+
+const AGENT_COMPACTION_USED_RATIO = 0.85;
+
+function resendInstructionsAfterCompaction(session: AcpThreadSession): void {
+  deliveredInstructionsByProviderThreadId.delete(session.providerThreadId);
+  session.pendingInstructions = session.construction.instructions;
 }
 
 function finishCompaction(
@@ -3505,6 +3554,9 @@ function finishCompaction(
     threadId: session.bbThreadId,
     ...outcome,
   });
+  if (outcome.status === "completed") {
+    resendInstructionsAfterCompaction(session);
+  }
   setActivePromptKind(session, null);
   session.turnSettled = undefined;
 }
@@ -3608,12 +3660,30 @@ function handleAgentNotification(
     }
   }
   if (session.activePromptKind === "compaction") {
+    if (acpUsageUpdateSchema.safeParse(parsed.data.update).success) {
+      session.compactionUsageReceived = true;
+    }
     const chunk = acpAgentMessageChunkUpdateSchema.safeParse(
       parsed.data.update,
     );
     if (chunk.success) {
       session.compactionAgentMessage +=
         extractAcpContentText(chunk.data.content) ?? "";
+    }
+  }
+  if (parsed.data.update.sessionUpdate === "usage_update") {
+    const usage = acpUsageUpdateSchema.safeParse(parsed.data.update);
+    if (usage.success) {
+      const previous = session.lastUsageUpdate;
+      session.lastUsageUpdate = usage.data;
+      if (
+        previous !== undefined &&
+        previous.size === usage.data.size &&
+        session.activePromptKind !== "compaction" &&
+        usage.data.used < previous.used * AGENT_COMPACTION_USED_RATIO
+      ) {
+        resendInstructionsAfterCompaction(session);
+      }
     }
   }
   emitSessionUpdate(session, parsed.data.update, rawUpdate);
@@ -3896,9 +3966,10 @@ async function handleRequest(
     case "provider/installation/status":
       sendResult(
         request.id,
-        await getAcpProviderInstallationStatus(
-          maintenanceTarget(request.params.providerOptions),
-        ),
+        await getAcpProviderInstallationStatus({
+          ...maintenanceTarget(request.params.providerOptions),
+          checkUpdates: request.params.checkUpdates,
+        }),
       );
       return;
 
@@ -3997,6 +4068,13 @@ async function handleRequest(
       }
       const reconciled = reconcileExecutionSettings(session, params.options);
       session = reconciled instanceof Promise ? await reconciled : reconciled;
+      if (
+        deliveredInstructionsByProviderThreadId.get(
+          session.providerThreadId,
+        ) !== session.construction.instructions
+      ) {
+        session.pendingInstructions = session.construction.instructions;
+      }
       if (params.options.sessionOptions !== undefined) {
         await applySessionOptionSelections(
           session,
@@ -4070,6 +4148,9 @@ async function handleRequest(
     }
 
     case "thread/discard":
+      deliveredInstructionsByProviderThreadId.delete(
+        request.params.providerThreadId,
+      );
       sendResult(request.id, { ok: true });
       return;
 
