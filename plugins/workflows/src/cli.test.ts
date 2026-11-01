@@ -133,6 +133,20 @@ describe("workflows CLI argument validation", () => {
       argv: ["stop"],
       error: "stop requires a run ID",
     },
+    {
+      // A flag takes no value, so a stray argument after it is a positional
+      // rather than its value.
+      argv: ["teardown", "run-1", "--discard-uncommitted", "run-2"],
+      error: "teardown accepts exactly one run ID",
+    },
+    {
+      argv: ["teardown", "--discard-uncommitted"],
+      error: "teardown requires a run ID",
+    },
+    {
+      argv: ["run", "--script", "source", "--allow-dirty", "--allow-dirty"],
+      error: "--allow-dirty may be provided only once",
+    },
   ])("rejects malformed invocation $argv", async ({ argv, error }) => {
     await expect(harness.runCli(argv)).resolves.toMatchObject({
       exitCode: 1,
@@ -147,7 +161,15 @@ describe("workflows CLI argument validation", () => {
     ]);
     expect(
       harness.registrations.cli?.commands.map((command) => command.name),
-    ).toEqual(["run", "validate", "status", "history", "list", "stop"]);
+    ).toEqual([
+      "run",
+      "validate",
+      "status",
+      "history",
+      "list",
+      "stop",
+      "teardown",
+    ]);
     const run = harness.registrations.agentTools.find(
       (tool) => tool.name === "bb_workflow_run",
     );

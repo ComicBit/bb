@@ -129,6 +129,9 @@ describe("workflow agent option validation", () => {
       outputSchema: { type: "object" },
       title: "Correctness review",
       phase: "Review",
+      environment: null,
+      continueThreadId: null,
+      reportIdentity: false,
     });
     expect(
       parseAgentOptions({ title: "Review", label: "Review" }),
@@ -186,6 +189,9 @@ describe("workflow agent option validation", () => {
       outputSchema: null,
       title: "Worker",
       phase: null,
+      environment: null,
+      continueThreadId: null,
+      reportIdentity: false,
     });
     expect(() =>
       parseStoredAgentOptions({

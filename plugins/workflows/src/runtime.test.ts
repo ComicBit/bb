@@ -28,8 +28,8 @@ describe("workflow QuickJS runtime", () => {
     });
 
     expect(calls).toEqual([
-      'first:{"selection":null,"outputSchema":null,"title":"A","phase":null}',
-      'second:{"selection":null,"outputSchema":null,"title":"B","phase":null}',
+      'first:{"selection":null,"outputSchema":null,"title":"A","phase":null,"environment":null,"continueThreadId":null,"reportIdentity":false}',
+      'second:{"selection":null,"outputSchema":null,"title":"B","phase":null,"environment":null,"continueThreadId":null,"reportIdentity":false}',
     ]);
     expect(result).toEqual({
       values: [{ prompt: "first" }, { prompt: "second" }],

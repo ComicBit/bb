@@ -128,6 +128,50 @@ const verified = await parallel(
 );
 ```
 
+## Isolated lanes: parallel work that WRITES
+
+Every pattern above fans out readers. Concurrent WRITERS need separate
+workspaces, or they trample each other in one working tree. Give each lane its
+own worktree, keep one executor per lane, and review inside that worktree:
+
+```js
+const lane = await agent(task.prompt, {
+  environment: { worktree: {} }, // fresh worktree off the origin's branch
+  reportIdentity: true, // { value, threadId, environmentId, branchName, changedFiles }
+  phase: "Execute",
+});
+if (lane.changedFiles === 0) return { status: "no-changes" }; // nothing to review
+
+const review = await agent(reviewPrompt(task), {
+  environment: { environmentId: lane.environmentId }, // same worktree, fresh reviewer
+  schema: REVIEW_SCHEMA,
+  phase: "Review",
+});
+if (!review.approved && review.findings.some((f) => f.severity === "blocking")) {
+  await agent(fixPrompt(review.findings), { continue: lane.threadId }); // same executor
+}
+```
+
+Rules that fall out of the primitives:
+
+- **One executor per lane, continued.** `continue` keeps the worker's context,
+  so a fix round costs no re-reading. A fresh reviewer each round keeps the
+  judgment independent; carry prior findings in the prompt, not a transcript.
+- **The script owns the gate.** Decide "loop again" in code from structured
+  findings. A reviewer's own `approved` boolean is the easiest thing in the
+  loop to soften.
+- **Cap the loop and say so.** Exhausting the cap is an `unresolved` lane with
+  its outstanding findings attached, never a silent pass.
+- **Merge in declared order.** Completion order makes the resulting tree depend
+  on scheduling, which a resumed run will not reproduce.
+- **Never a naked `null`.** Wrap each lane so it always resolves to a status;
+  `parallel()` turns a throw into `null`, and `.filter(Boolean)` is how "7 of 8
+  lanes merged" gets reported as "all lanes merged".
+- **Branch names come from BB**, reported as `branchName`. Lane branches
+  survive worktree teardown; uncommitted files do not.
+
+A worked implementation ships with the plugin at `examples/lanes.js`.
+
 ## Quality patterns
 
 These are common shapes; pick by task and compose freely:

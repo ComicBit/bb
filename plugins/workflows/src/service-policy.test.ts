@@ -191,6 +191,7 @@ function setup(
       source: workflowSource,
       args: null,
       resumedFromRunId: null,
+      allowDirty: false,
     });
   }
 
@@ -1086,6 +1087,7 @@ describe("workflow service policy integration", () => {
         source: source(`return "resume";`),
         args: null,
         resumedFromRunId: ancestor.id,
+        allowDirty: false,
       }),
     ).rejects.toThrow("before it is terminal");
 
@@ -1101,6 +1103,7 @@ describe("workflow service policy integration", () => {
         source: source(`return "resume";`),
         args: null,
         resumedFromRunId: ancestor.id,
+        allowDirty: false,
       }),
     ).resolves.toMatchObject({ resumedFromRunId: ancestor.id });
 
@@ -1116,6 +1119,7 @@ describe("workflow service policy integration", () => {
         source: source(`return "resume";`),
         args: null,
         resumedFromRunId: ancestor.id,
+        allowDirty: false,
       }),
     ).rejects.toThrow("different environment or workspace");
   });

@@ -58,8 +58,11 @@ function parseArguments(
   argv: readonly string[],
   allowedOptions: readonly string[],
   positionalDescription: string | null = null,
+  /** Options that stand alone; they take no value and record as "true". */
+  flagOptions: readonly string[] = [],
 ): ParsedArguments {
-  const allowed = new Set(allowedOptions);
+  const allowed = new Set([...allowedOptions, ...flagOptions]);
+  const flags = new Set(flagOptions);
   const options = new Map<string, string>();
   const positionals: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -73,6 +76,10 @@ function parseArguments(
     }
     if (options.has(argument)) {
       throw new Error(`${argument} may be provided only once`);
+    }
+    if (flags.has(argument)) {
+      options.set(argument, "true");
+      continue;
     }
     const value = argv[index + 1];
     if (value === undefined || value.startsWith("--")) {
@@ -338,7 +345,7 @@ export function registerWorkflowCli(
         name: "run",
         summary: "Start a workflow and return immediately",
         usage:
-          "bb workflows run (--script '<javascript>'|--file <path>|--name <name>) [--args '<json>'] [--resume <run-id>]",
+          "bb workflows run (--script '<javascript>'|--file <path>|--name <name>) [--args '<json>'] [--resume <run-id>] [--allow-dirty]",
       },
       {
         name: "validate",
@@ -367,19 +374,22 @@ export function registerWorkflowCli(
         summary: "Cancel a workflow run",
         usage: "bb workflows stop <run-id>",
       },
+      {
+        name: "teardown",
+        summary: "Destroy the worktrees a finished run provisioned",
+        usage: "bb workflows teardown <run-id> [--discard-uncommitted]",
+      },
     ],
     async run(argv, ctx) {
       try {
         const command = argv[0];
         if (command === "run") {
-          const { options } = parseArguments(argv.slice(1), [
-            "--script",
-            "--source",
-            "--file",
-            "--name",
-            "--args",
-            "--resume",
-          ]);
+          const { options } = parseArguments(
+            argv.slice(1),
+            ["--script", "--source", "--file", "--name", "--args", "--resume"],
+            null,
+            ["--allow-dirty"],
+          );
           const context = requireContext(ctx);
           const prepared = await prepareWorkflowSource(
             bb,
@@ -392,6 +402,7 @@ export function registerWorkflowCli(
             source: prepared.source,
             args: parseJsonOption(options.get("--args")),
             resumedFromRunId: options.get("--resume") ?? null,
+            allowDirty: options.has("--allow-dirty"),
           });
           return success({ runId: run.id, name: run.name, status: run.status });
         }
@@ -496,8 +507,27 @@ export function registerWorkflowCli(
           }
           return success({ runId, stopped: await service.stop(runId) });
         }
+        if (command === "teardown") {
+          const { positionals, options } = parseArguments(
+            argv.slice(1),
+            [],
+            "teardown",
+            ["--discard-uncommitted"],
+          );
+          const context = requireContext(ctx);
+          const runId = positionals[0]!;
+          const run = service.get(runId);
+          if (run === null || run.projectId !== context.projectId) {
+            throw new Error(`Unknown workflow run ${runId}`);
+          }
+          return success(
+            await service.teardown(runId, {
+              discardUncommitted: options.has("--discard-uncommitted"),
+            }),
+          );
+        }
         return failure(
-          "Usage: bb workflows <run|validate|status|history|list|stop> [options]",
+          "Usage: bb workflows <run|validate|status|history|list|stop|teardown> [options]",
         );
       } catch (error) {
         return failure(error instanceof Error ? error.message : String(error));

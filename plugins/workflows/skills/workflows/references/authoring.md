@@ -51,6 +51,28 @@ and per-agent result schemas; rejection errors identify the unsafe schema path.
   explicitly assigns this agent to a progress group; use this inside
   `pipeline()`/`parallel()` stages to avoid races on the global `phase()` state —
   same phase string → same group.
+  - `opts.environment` places the worker somewhere other than the run's origin
+    workspace. `{ worktree: {} }` provisions a fresh managed worktree on the
+    origin's host, based on the branch the origin environment is on — the commit
+    the orchestrator launched from, which is exact because a run refuses to
+    start over an uncommitted origin workspace (override with
+    `bb_workflow_run`'s `allowDirty`). `{ worktree: { baseBranch: "release/2" } }`
+    pins a different base. `{ environmentId }` attaches an environment an
+    earlier call created, which is how a reviewer reads the same worktree the
+    executor wrote. BB names the worktree's branch, not the caller.
+  - `opts.continue: "<threadId>"` sends this prompt to an existing worker
+    instead of spawning a new one: the worker keeps its conversation, its
+    workspace, and its own execution settings, so its provider must match this
+    call's. Cannot be combined with `environment`.
+  - `opts.reportIdentity: true` resolves to
+    `{ value, threadId, environmentId, branchName, changedFiles }` instead of the
+    bare value — `threadId` for `continue`, `environmentId` for a reviewer,
+    `branchName` for a merge, and `changedFiles` (files committed versus the
+    base, or null when unknown) to skip review for a lane that changed nothing.
+  - A worker placed in its own worktree is parented to the origin thread so the
+    orchestrator can reach it; ordinary workers stay root threads. Anything a
+    placed worker leaves uncommitted is committed for it before the call
+    resolves, because worktree teardown force-removes the tree.
 - `pipeline(items, stage1, stage2, ...)`: run each item through all stages
   independently, NO barrier between stages. Item A can be in stage 3 while item
   B is still in stage 1. This is the DEFAULT for multi-stage work. Wall-clock =

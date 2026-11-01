@@ -735,6 +735,7 @@ describe("workflows plugin", () => {
       originThreadId: "thread-test",
       source,
       resumedFromRunId: null,
+      allowDirty: false,
     };
 
     const cyclic: { self?: unknown } = {};
@@ -850,6 +851,7 @@ describe("workflow resume cache integration", () => {
         source,
         args: null,
         resumedFromRunId,
+        allowDirty: false,
       });
     }
 
@@ -998,7 +1000,7 @@ describe("workflow resume cache integration", () => {
     expect(test.childCount()).toBe(2);
     expect(getCall(test.db, displayOnly.id, 0)).toMatchObject({
       optionsJson:
-        '{"selection":null,"outputSchema":null,"title":"Renamed first","phase":"Display A"}',
+        '{"selection":null,"outputSchema":null,"title":"Renamed first","phase":"Display A","environment":null,"continueThreadId":null,"reportIdentity":false}',
       replaySource: "resumed-run",
       replayedFromCallId: getCall(test.db, base.id, 0)?.id,
       resolvedProvider: "codex",

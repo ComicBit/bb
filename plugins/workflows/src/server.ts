@@ -59,6 +59,12 @@ const runInputSchema = z
         "Run ID of a prior BB workflow to resume from. Calls in the causally safe, longest unchanged prefix return cached results; the first edited, new, or concurrent call and everything after it run live. The prior run must be terminal and from the same project and environment.",
       )
       .default(null),
+    allowDirty: z
+      .boolean()
+      .describe(
+        "Start even though the origin workspace has uncommitted changes. Refused by default: lanes are cut from the origin branch's tip, so uncommitted work is invisible to every lane and every reviewer. Commit first unless you mean to exclude it.",
+      )
+      .default(false),
   })
   .strict();
 const resultInputSchema = z
@@ -151,6 +157,7 @@ export default async function plugin(bb: BbPluginApi) {
           source: prepared.source,
           args: toJsonValue(input.args, "args"),
           resumedFromRunId: input.resumeRunId,
+          allowDirty: input.allowDirty,
         });
         const previewDirective = `::workflow-preview{run="${run.id}"}`;
         return jsonResult({

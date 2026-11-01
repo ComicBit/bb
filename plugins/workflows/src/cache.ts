@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import type { JsonSchema, JsonValue } from "./types.js";
 
-export const WORKFLOW_CALL_CACHE_VERSION: "workflow-call-cache-v1" =
-  "workflow-call-cache-v1";
+export const WORKFLOW_CALL_CACHE_VERSION: "workflow-call-cache-v2" =
+  "workflow-call-cache-v2";
 
 export interface ResolvedWorkflowExecutionSelection {
   providerId: string;
@@ -17,6 +17,21 @@ interface WorkflowCallExecutionSemantics {
   maxRepairAttempts: number;
 }
 
+/**
+ * Where the call ran. A call that provisions a worktree, attaches an existing
+ * environment, or continues an existing worker is a different call from one
+ * that reuses the run's origin environment, even with an identical prompt:
+ * replaying the wrong one would either double-provision a worktree or graft a
+ * cached answer onto the wrong workspace.
+ */
+interface WorkflowCallPlacement {
+  environment:
+    | { kind: "origin" }
+    | { kind: "worktree"; baseBranch: string | null }
+    | { kind: "existing"; environmentId: string };
+  continueThreadId: string | null;
+}
+
 export interface WorkflowCallCacheInput {
   version: typeof WORKFLOW_CALL_CACHE_VERSION;
   previousCacheKey: string | null;
@@ -24,6 +39,7 @@ export interface WorkflowCallCacheInput {
   selection: ResolvedWorkflowExecutionSelection;
   outputSchema: JsonSchema | null;
   executionSemantics: WorkflowCallExecutionSemantics;
+  placement: WorkflowCallPlacement;
 }
 
 export type WorkflowCallResultStatus =
@@ -185,6 +201,10 @@ export function computeWorkflowCallCacheKey(
       workerPromptVersion: input.executionSemantics.workerPromptVersion,
       resultProtocolVersion: input.executionSemantics.resultProtocolVersion,
       maxRepairAttempts: input.executionSemantics.maxRepairAttempts,
+    },
+    placement: {
+      environment: input.placement.environment,
+      continueThreadId: input.placement.continueThreadId,
     },
   };
   return createHash("sha256")

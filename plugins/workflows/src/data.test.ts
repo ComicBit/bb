@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WorkflowAgentOptions } from "./types.js";
 import {
   attachCallThread,
   cancelRun,
@@ -19,6 +20,21 @@ import {
   startCall,
   storeStructuredResult,
 } from "./data.js";
+
+function agentOptions(
+  overrides: Partial<WorkflowAgentOptions> = {},
+): WorkflowAgentOptions {
+  return {
+    selection: null,
+    outputSchema: null,
+    title: null,
+    phase: null,
+    environment: null,
+    continueThreadId: null,
+    reportIdentity: false,
+    ...overrides,
+  };
+}
 
 describe("workflow durable data", () => {
   let db: Database.Database;
@@ -103,12 +119,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "cache",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -122,7 +133,7 @@ describe("workflow durable data", () => {
     expect(getCall(db, run.id, 0)).toMatchObject({
       cacheKey: "cache",
       optionsJson:
-        '{"selection":null,"outputSchema":null,"title":null,"phase":null}',
+        '{"selection":null,"outputSchema":null,"title":null,"phase":null,"environment":null,"continueThreadId":null,"reportIdentity":false}',
       resolvedProvider: "codex",
       resolvedModel: "gpt-test",
       resolvedReasoningLevel: "medium",
@@ -141,12 +152,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "retry",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -184,12 +190,7 @@ describe("workflow durable data", () => {
         callIndex,
         cacheKey: `cache-${callIndex}`,
         prompt: `inspect ${callIndex}`,
-        options: {
-          selection: null,
-          outputSchema: null,
-          title: null,
-          phase: null,
-        },
+        options: agentOptions(),
         selection: resolvedSelection,
         replay: null,
       }),
@@ -240,12 +241,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "cache",
       prompt: "inspect",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -269,12 +265,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "null-cache",
       prompt: "return null",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -307,12 +298,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "null-cache",
       prompt: "return null",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -332,12 +318,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "structured",
       prompt: "answer",
-      options: {
-        selection: null,
-        outputSchema: { type: "object" },
-        title: null,
-        phase: null,
-      },
+      options: agentOptions({ outputSchema: { type: "object" } }),
       selection: resolvedSelection,
       replay: null,
     });
@@ -370,12 +351,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "repair",
       prompt: "answer",
-      options: {
-        selection: null,
-        outputSchema: { type: "number" },
-        title: null,
-        phase: null,
-      },
+      options: agentOptions({ outputSchema: { type: "number" } }),
       selection: resolvedSelection,
       replay: null,
     });
@@ -435,12 +411,7 @@ describe("workflow durable data", () => {
       callIndex: 0,
       cacheKey: "fire-and-forget",
       prompt: "slow",
-      options: {
-        selection: null,
-        outputSchema: null,
-        title: null,
-        phase: null,
-      },
+      options: agentOptions(),
       selection: resolvedSelection,
       replay: null,
     });
@@ -484,12 +455,7 @@ describe("workflow durable data", () => {
           callIndex: 0,
           cacheKey: `creation-${status}`,
           prompt: "state matrix",
-          options: {
-            selection: null,
-            outputSchema: null,
-            title: null,
-            phase: null,
-          },
+          options: agentOptions(),
           selection: resolvedSelection,
           replay: null,
         });
@@ -510,12 +476,7 @@ describe("workflow durable data", () => {
         callIndex: 0,
         cacheKey: `attachment-${status}`,
         prompt: "state matrix",
-        options: {
-          selection: null,
-          outputSchema: null,
-          title: null,
-          phase: null,
-        },
+        options: agentOptions(),
         selection: resolvedSelection,
         replay: null,
       });

@@ -17,14 +17,31 @@ paths, missing workspace roots, non-UTF-8 files, and sources over 512 KiB are
 rejected. QuickJS receives source text only; it never gets filesystem access.
 Plugin-bundled workflow discovery is not supported.
 
-`bb_workflow_run` also accepts optional JSON `args` and optional `resumeRunId`.
-It returns a durable run ID immediately. Use the compact `bb workflows status`
-summary, paged `bb workflows history`, `bb workflows list`, and
-`bb workflows stop` afterward. Completion is sent back as an agent-only input:
-it steers an active origin immediately or starts a turn when the origin is idle,
-without rendering a user-facing message. Delivery is duplicate-tolerant
-at-least-once because `threads.send` has no idempotency key. CLI status polling
-remains authoritative.
+`bb_workflow_run` also accepts optional JSON `args`, optional `resumeRunId`, and
+optional `allowDirty`. It returns a durable run ID immediately. Use the compact
+`bb workflows status` summary, paged `bb workflows history`,
+`bb workflows list`, and `bb workflows stop` afterward. Completion is sent back
+as an agent-only input: it steers an active origin immediately or starts a turn
+when the origin is idle, without rendering a user-facing message. Delivery is
+duplicate-tolerant at-least-once because `threads.send` has no idempotency key.
+CLI status polling remains authoritative.
+
+A run whose origin workspace has uncommitted changes is REFUSED, because a
+worker placed in its own worktree branches from the origin branch's tip and
+would never see that work. Commit first, or pass `allowDirty: true`
+(`--allow-dirty`) to accept excluding it. A workspace with no git state, or a
+host that cannot answer, does not block anything.
+
+## Tearing down lane worktrees
+
+`bb workflows teardown <run-id>` destroys the worktrees a terminal run
+provisioned through `agent()`'s `environment` option; the run's own origin
+environment is never touched. It archives each lane's threads, then requests
+environment deletion. A lane whose tree still has uncommitted changes, or whose
+status cannot be read, is KEPT and reported with a reason — worktree removal is
+`git worktree remove --force`, so nothing uncommitted survives it. Pass
+`--discard-uncommitted` to destroy them anyway. Lane branches survive teardown,
+so committed work stays reachable. The report lists `destroyed` and `kept`.
 
 `list` also returns compact summaries; it is safe for discovery but is not a
 substitute for the redirected detailed history.
@@ -53,8 +70,11 @@ same project and environment workspace and always creates a new run. The
 longest unchanged prefix of successful `agent()` calls returns cached results;
 the first edited or new call and everything after it runs live. The cache key
 includes call order, prompt, resolved provider/model/reasoning/permission,
-output schema, and worker protocol semantics. Display-only phase, label, and
-title changes do not invalidate it.
+output schema, worker protocol semantics, and placement — the environment the
+call ran in and the worker it continued. Display-only phase, label, and title
+changes do not invalidate it. A replayed call returns the same worker thread,
+environment, and branch it originally reported, so resume never
+double-provisions a worktree.
 
 Parallel calls receive cache identities in deterministic invocation order, so
 concurrency alone does not stop replay. Successful calls that edited files or
@@ -83,6 +103,8 @@ bb workflows status <run-id>
 bb workflows history <run-id> --cursor 0 --limit 100
 bb workflows list --limit 20
 bb workflows stop <run-id>
+bb workflows run --name lanes --args '<json>' --allow-dirty
+bb workflows teardown <run-id> [--discard-uncommitted]
 bb provider list --environment "$BB_ENVIRONMENT_ID" --json
 bb provider models <provider-id> --environment "$BB_ENVIRONMENT_ID" --json
 ```

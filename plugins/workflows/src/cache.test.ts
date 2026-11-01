@@ -30,6 +30,10 @@ function cacheInput(): WorkflowCallCacheInput {
       resultProtocolVersion: "structured-result-v1",
       maxRepairAttempts: 2,
     },
+    placement: {
+      environment: { kind: "origin" },
+      continueThreadId: null,
+    },
   };
 }
 
@@ -41,6 +45,10 @@ describe("workflow call cache identity", () => {
         maxRepairAttempts: 2,
         resultProtocolVersion: "structured-result-v1",
         workerPromptVersion: "worker-prompt-v1",
+      },
+      placement: {
+        continueThreadId: null,
+        environment: { kind: "origin" },
       },
       outputSchema: {
         required: ["approved"],
@@ -61,8 +69,9 @@ describe("workflow call cache identity", () => {
     expect(computeWorkflowCallCacheKey(first)).toBe(
       computeWorkflowCallCacheKey(second),
     );
+    // This golden hash changes only alongside a deliberate WORKFLOW_CALL_CACHE_VERSION bump.
     expect(computeWorkflowCallCacheKey(first)).toBe(
-      "836c4c5a50796a354fa9ac398bb6c7e4b394a8442fdf51e74e7d7fbc44997125",
+      "a6387abefbf43497f50d39bcbc27d9959c481ffd2cf8085f928aab502cd8c435",
     );
   });
 
@@ -134,6 +143,46 @@ describe("workflow call cache identity", () => {
           ...input.executionSemantics,
           maxRepairAttempts: 3,
         },
+      }),
+    ],
+    [
+      "worktree placement",
+      (input: WorkflowCallCacheInput) => ({
+        ...input,
+        placement: {
+          ...input.placement,
+          environment: { kind: "worktree" as const, baseBranch: null },
+        },
+      }),
+    ],
+    [
+      "worktree base branch",
+      (input: WorkflowCallCacheInput) => ({
+        ...input,
+        placement: {
+          ...input.placement,
+          environment: { kind: "worktree" as const, baseBranch: "main" },
+        },
+      }),
+    ],
+    [
+      "attached environment",
+      (input: WorkflowCallCacheInput) => ({
+        ...input,
+        placement: {
+          ...input.placement,
+          environment: {
+            kind: "existing" as const,
+            environmentId: "env_lane_1",
+          },
+        },
+      }),
+    ],
+    [
+      "continued worker",
+      (input: WorkflowCallCacheInput) => ({
+        ...input,
+        placement: { ...input.placement, continueThreadId: "thr_executor" },
       }),
     ],
   ])("invalidates when %s changes", (_field, change) => {

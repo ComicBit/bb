@@ -28,11 +28,13 @@ import {
   listActiveRunsForOriginThread,
   listRuns,
   listPendingNotificationRuns,
+  listRunProvisionedEnvironments,
   listRunningCalls,
   listTimedOutRuns,
   markCallReplayedSameRun,
   markNotificationSent,
   queueCallProviderRetry,
+  recordCallPlacement,
   recordNotificationFailure,
   recoverInterruptedRuns,
   settleNotificationUndeliverable,
@@ -99,6 +101,45 @@ const NOTIFICATION_RETRY_BASE_MS = 1_000;
 const NOTIFICATION_RETRY_MAX_MS = 60 * 60 * 1_000;
 const PROVIDER_RETRY_DELAYS_MS = [1_000, 4_000] as const;
 const RETENTION_SWEEP_RUNS = 20;
+type ThreadSpawnEnvironment =
+  | { type: "reuse"; environmentId: string }
+  | {
+      type: "host";
+      hostId: string;
+      workspace: {
+        type: "managed-worktree";
+        baseBranch: { kind: "named"; name: string } | { kind: "default" };
+      };
+    };
+
+interface WorkerPlacement {
+  threadId: string;
+  environmentId: string | null;
+  branchName: string | null;
+}
+
+/**
+ * What a call resolves to. `reportIdentity` swaps the bare value for the
+ * worker's identity alongside it, so a script can send follow-up work to the
+ * same worker, address the worktree it created, and skip review for a lane
+ * that committed nothing. `changedFiles` is null when the call did not run in
+ * a lane workspace, or when git status was unavailable.
+ */
+function callResult(
+  options: WorkflowAgentOptions,
+  placement: Omit<WorkerPlacement, "threadId"> & { threadId: string | null },
+  value: JsonValue,
+  changedFiles: number | null = null,
+): JsonValue {
+  if (!options.reportIdentity) return value;
+  return {
+    value,
+    threadId: placement.threadId,
+    environmentId: placement.environmentId,
+    branchName: placement.branchName,
+    changedFiles,
+  };
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -335,6 +376,28 @@ interface StartWorkflowInput {
   source: string;
   args: JsonValue;
   resumedFromRunId: string | null;
+  /**
+   * Start over uncommitted changes in the origin workspace. Refused by
+   * default: lanes are cut from the origin's branch tip, so uncommitted work
+   * is invisible to every lane and to every reviewer, and merges land on top
+   * of it later.
+   */
+  allowDirty: boolean;
+}
+
+/**
+ * Outcome of destroying a run's lane worktrees. `kept` is the important arm:
+ * worktree removal is `git worktree remove --force`, so a lane whose tree is
+ * still dirty is left standing rather than silently discarded.
+ */
+export interface WorkflowTeardownReport {
+  runId: string;
+  destroyed: Array<{ environmentId: string; branchName: string | null }>;
+  kept: Array<{
+    environmentId: string;
+    branchName: string | null;
+    reason: string;
+  }>;
 }
 
 export interface WorkflowService {
@@ -350,6 +413,10 @@ export interface WorkflowService {
   inspectActiveForThread(threadId: string): WorkflowRunInspection[];
   list(projectId: string, limit: number): WorkflowRunRow[];
   stop(runId: string): Promise<boolean>;
+  teardown(
+    runId: string,
+    options: { discardUncommitted: boolean },
+  ): Promise<WorkflowTeardownReport>;
   updateSettings(settings: WorkflowSettings): void;
   runWorker(signal: AbortSignal): Promise<void>;
   onThreadIdle(threadId: string, output: string | null): void;
@@ -453,6 +520,121 @@ export function createWorkflowService(
     };
   }
 
+  /**
+   * Host and base branch of the run's origin environment.
+   *
+   * A lane worktree must be provisioned on the machine the orchestrator runs
+   * on: a lane branch on another host is not mergeable by an integrator here
+   * without a remote round-trip. And its base is the branch the origin is on,
+   * so every lane starts from the commit the orchestrator launched from —
+   * which is exact only because a run refuses to start over a dirty origin.
+   */
+  const originHostIds = new Map<string, Promise<string>>();
+  function originHostId(run: WorkflowRunRow): Promise<string> {
+    const cached = originHostIds.get(run.id);
+    if (cached !== undefined) return cached;
+    const resolving = bb.sdk.environments
+      .get({ environmentId: run.environmentId })
+      .then((environment) => environment.hostId);
+    originHostIds.set(run.id, resolving);
+    void resolving.catch(() => originHostIds.delete(run.id));
+    return resolving;
+  }
+
+  const originBaseBranches = new Map<string, Promise<string | null>>();
+  function originBaseBranch(run: WorkflowRunRow): Promise<string | null> {
+    const cached = originBaseBranches.get(run.id);
+    if (cached !== undefined) return cached;
+    const resolving = bb.sdk.environments
+      .get({ environmentId: run.environmentId })
+      .then((environment) => environment.branchName);
+    originBaseBranches.set(run.id, resolving);
+    void resolving.catch(() => originBaseBranches.delete(run.id));
+    return resolving;
+  }
+
+  async function spawnEnvironmentArgs(
+    run: WorkflowRunRow,
+    environment: WorkflowAgentOptions["environment"],
+  ): Promise<ThreadSpawnEnvironment> {
+    if (environment === null) {
+      return { type: "reuse", environmentId: run.environmentId };
+    }
+    if (environment.kind === "existing") {
+      return { type: "reuse", environmentId: environment.environmentId };
+    }
+    const [hostId, base] = await Promise.all([
+      originHostId(run),
+      environment.baseBranch === null
+        ? originBaseBranch(run)
+        : Promise.resolve(environment.baseBranch),
+    ]);
+    return {
+      type: "host",
+      hostId,
+      workspace: {
+        type: "managed-worktree",
+        baseBranch:
+          base === null ? { kind: "default" } : { kind: "named", name: base },
+      },
+    };
+  }
+
+  /**
+   * Read a workspace's git state, or null when it cannot be read at all — a
+   * personal workspace has none, and a host that cannot answer is not evidence
+   * of anything. Callers decide what an unknown answer means; none of them may
+   * treat it as "clean".
+   */
+  async function readWorkspaceStatus(
+    environmentId: string,
+    mergeBaseBranch?: string,
+  ) {
+    try {
+      return await bb.sdk.environments.status({
+        environmentId,
+        mergeBaseBranch,
+      });
+    } catch (error) {
+      bb.log.debug(
+        `Could not read workspace status for ${environmentId}: ${message(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * A lane worktree starts at the origin branch's tip, so anything still
+   * uncommitted in the orchestrator's workspace is invisible to every lane
+   * that reads the code and to every reviewer that judges it. Refusing here
+   * costs nothing; discovering it after eight lanes have branched costs the
+   * whole run.
+   *
+   * Only a workspace KNOWN to be dirty blocks a run. A personal workspace has
+   * no git state to read, and a host that cannot answer right now is not
+   * evidence of anything — neither may stop a workflow that does not use
+   * lanes at all.
+   */
+  async function assertOriginCommitted(
+    environmentId: string,
+    allowDirty: boolean,
+  ): Promise<void> {
+    if (allowDirty) return;
+    const status = await readWorkspaceStatus(environmentId);
+    if (status === null || status.outcome !== "available") return;
+    const workingTree = status.workspace.workingTree;
+    if (!workingTree.hasUncommittedChanges) return;
+    const files = workingTree.files
+      .slice(0, 5)
+      .map((file) => file.path)
+      .join(", ");
+    throw new Error(
+      `Workflow origin workspace has ${workingTree.files.length} uncommitted file(s) (${files}` +
+        `${workingTree.files.length > 5 ? ", …" : ""}). Commit them so lanes branch from the same code, ` +
+        `or start again with allowDirty to accept that lanes will not see them.`,
+    );
+  }
+
   async function start(input: StartWorkflowInput): Promise<WorkflowRunRow> {
     const parsed = parseWorkflowSource(input.source);
     assertBoundedJson(input.args, "Workflow args", VALUE_LIMITS);
@@ -494,6 +676,7 @@ export function createWorkflowService(
         );
       }
     }
+    await assertOriginCommitted(origin.environmentId, input.allowDirty);
     const created = createRun(db, {
       projectId: input.projectId,
       originThreadId: input.originThreadId,
@@ -700,6 +883,146 @@ export function createWorkflowService(
     });
   }
 
+  async function spawnWorker(
+    run: WorkflowRunRow,
+    callIndex: number,
+    prompt: string,
+    options: WorkflowAgentOptions,
+    selection: ResolvedSelection,
+  ): Promise<WorkerPlacement> {
+    const child = await bb.sdk.threads.spawn({
+      projectId: run.projectId,
+      environment: await spawnEnvironmentArgs(run, options.environment),
+      prompt: childPrompt(run, prompt, options),
+      title: options.title ?? `${run.name} · ${callIndex + 1}`,
+      providerId: selection.providerId,
+      model: selection.model,
+      reasoningLevel: selection.reasoningLevel,
+      permissionMode: selection.permissionMode,
+      visibility: "hidden",
+      // A lane worker outlives its first call and the orchestrator has to be
+      // able to reach it, so it is parented and reports blockers upward.
+      // Ordinary workers stay root: a hundred-call run would otherwise
+      // notify the origin a hundred times over.
+      ...(options.environment === null
+        ? {}
+        : { parentThreadId: run.originThreadId }),
+    });
+    return {
+      threadId: child.id,
+      environmentId: child.environmentId,
+      branchName: null,
+    };
+  }
+
+  /**
+   * Send follow-up work to a worker that already exists. The worker keeps its
+   * conversation, its workspace, and its own execution settings, so the
+   * provider has to match what this call resolved: a lane executor cannot
+   * change provider mid-lane.
+   */
+  async function continueWorker(
+    threadId: string,
+    prompt: string,
+    selection: ResolvedSelection,
+  ): Promise<WorkerPlacement> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    if (thread.providerId !== selection.providerId) {
+      throw new Error(
+        `Cannot continue worker ${threadId} on provider ${selection.providerId}: it runs on ${thread.providerId}`,
+      );
+    }
+    await bb.sdk.threads.send({
+      threadId,
+      mode: "auto",
+      input: [{ type: "text", text: prompt, mentions: [] }],
+    });
+    return {
+      threadId,
+      environmentId: thread.environmentId,
+      branchName: null,
+    };
+  }
+
+  /**
+   * Read back where a worker actually ran. Worktree provisioning is
+   * asynchronous, so the spawn response can carry a null environment; by the
+   * time the worker's turn has settled the environment exists, which is the
+   * only point this is called.
+   */
+  async function resolveWorkerPlacement(
+    threadId: string,
+  ): Promise<WorkerPlacement> {
+    const thread = await bb.sdk.threads.get({ threadId });
+    if (thread.environmentId === null) {
+      return { threadId, environmentId: null, branchName: null };
+    }
+    const environment = await bb.sdk.environments.get({
+      environmentId: thread.environmentId,
+    });
+    return {
+      threadId,
+      environmentId: environment.id,
+      branchName: environment.branchName,
+    };
+  }
+
+  /**
+   * Close out a lane worker's workspace before anything else looks at it.
+   *
+   * Two facts drive this. Worktree teardown runs `git worktree remove --force`,
+   * so anything a worker leaves uncommitted is destroyed rather than kept —
+   * which makes "commit before review" a data-loss guard, not a style rule.
+   * And a reviewer is worth spawning only when the lane actually produced
+   * commits, so the committed-change count travels back with the identity.
+   *
+   * Both answers come from BB's own environment actions; nothing is delegated
+   * to a prompt the worker could argue with.
+   */
+  async function closeOutWorkspace(
+    run: WorkflowRunRow,
+    placement: WorkerPlacement,
+  ): Promise<{ committed: boolean; changedFiles: number | null }> {
+    if (
+      placement.environmentId === null ||
+      placement.environmentId === run.environmentId
+    ) {
+      return { committed: false, changedFiles: null };
+    }
+    const environmentId = placement.environmentId;
+    const environment = await bb.sdk.environments.get({ environmentId });
+    const mergeBaseBranch = environment.baseBranch ?? undefined;
+    let status = await readWorkspaceStatus(environmentId, mergeBaseBranch);
+    let committed = false;
+    if (
+      status?.outcome === "available" &&
+      status.workspace.workingTree.hasUncommittedChanges
+    ) {
+      const commit = await bb.sdk.environments.commit({ environmentId });
+      committed = true;
+      bb.log.info(
+        `[${run.id}] Committed work the lane worker left uncommitted in ${environmentId}` +
+          `${commit.commitSha === null ? "" : ` as ${commit.commitSha}`}`,
+      );
+      status = await readWorkspaceStatus(environmentId, mergeBaseBranch);
+      if (
+        status?.outcome === "available" &&
+        status.workspace.workingTree.hasUncommittedChanges
+      ) {
+        bb.log.warn(
+          `[${run.id}] Environment ${environmentId} is still dirty after committing; teardown would discard it`,
+        );
+      }
+    }
+    return {
+      committed,
+      changedFiles:
+        status?.outcome === "available"
+          ? (status.workspace.mergeBase?.files.length ?? null)
+          : null,
+    };
+  }
+
   async function runAgentCall(
     run: WorkflowRunRow,
     callIndex: number,
@@ -746,7 +1069,11 @@ export function createWorkflowService(
             });
             if (sameRunCall.cacheKey === cacheKey && reuse.reusable) {
               markCallReplayedSameRun(db, sameRunCall.id);
-              return reuse.result;
+              return callResult(
+                options,
+                { ...sameRunCall, threadId: sameRunCall.childThreadId },
+                reuse.result,
+              );
             }
           }
           replay.prefix = false;
@@ -769,7 +1096,7 @@ export function createWorkflowService(
               candidate === null ? null : { status: candidate.status, result },
             );
             if (candidate?.cacheKey === cacheKey && reuse.reusable) {
-              startCall(db, {
+              const replayed = startCall(db, {
                 runId: run.id,
                 callIndex,
                 cacheKey,
@@ -778,7 +1105,12 @@ export function createWorkflowService(
                 selection,
                 replay: { callId: candidate.id, result: reuse.result },
               });
-              return reuse.result;
+              recordCallPlacement(db, replayed.id, candidate);
+              return callResult(
+                options,
+                { ...candidate, threadId: candidate.childThreadId },
+                reuse.result,
+              );
             }
           }
           replay.prefix = false;
@@ -800,52 +1132,58 @@ export function createWorkflowService(
     while (true) {
       try {
         throwIfCancelled(signal);
-        const child = await bb.sdk.threads.spawn({
-          projectId: run.projectId,
-          environment: { type: "reuse", environmentId: run.environmentId },
-          prompt: childPrompt(run, prompt, options),
-          title: options.title ?? `${run.name} · ${callIndex + 1}`,
-          providerId: selection.providerId,
-          model: selection.model,
-          reasoningLevel: selection.reasoningLevel,
-          permissionMode: selection.permissionMode,
-          visibility: "hidden",
-        });
+        const worker =
+          options.continueThreadId === null
+            ? await spawnWorker(run, callIndex, prompt, options, selection)
+            : await continueWorker(options.continueThreadId, prompt, selection);
         if (signal.aborted) {
-          await stopChild(child.id);
+          await stopChild(worker.threadId);
           throw new Error("Workflow cancelled");
         }
-        const attached = attachCallThread(db, call.id, child.id);
+        const attached = attachCallThread(db, call.id, worker.threadId, worker);
         if (!attached || signal.aborted) {
-          await stopChild(child.id);
+          await stopChild(worker.threadId);
           throw new Error("Workflow cancelled");
         }
-        const stopOnAbort = () => void stopChild(child.id);
+        const stopOnAbort = () => void stopChild(worker.threadId);
         signal.addEventListener("abort", stopOnAbort, { once: true });
         try {
-          const current = await bb.sdk.threads.get({ threadId: child.id });
+          const current = await bb.sdk.threads.get({
+            threadId: worker.threadId,
+          });
           throwIfCancelled(signal);
           if (current.status === "idle") {
-            const output = await bb.sdk.threads.output({ threadId: child.id });
+            const output = await bb.sdk.threads.output({
+              threadId: worker.threadId,
+            });
             throwIfCancelled(signal);
-            onThreadIdle(child.id, output.output);
+            onThreadIdle(worker.threadId, output.output);
           } else if (current.status === "error") {
             failThreadCall(
-              child.id,
+              worker.threadId,
               "Workflow worker failed before attachment completed",
             );
           }
         } catch (error) {
           if (signal.aborted) {
-            await stopChild(child.id);
+            await stopChild(worker.threadId);
             throw error;
           }
           bb.log.warn(
-            `Could not reconcile new workflow worker ${child.id}: ${message(error)}`,
+            `Could not reconcile new workflow worker ${worker.threadId}: ${message(error)}`,
           );
         }
         try {
-          return await waitForCall(call, signal);
+          const value = await waitForCall(call, signal);
+          const inLaneWorkspace =
+            options.environment !== null || options.continueThreadId !== null;
+          if (!options.reportIdentity && !inLaneWorkspace) {
+            return value;
+          }
+          const placement = await resolveWorkerPlacement(worker.threadId);
+          recordCallPlacement(db, call.id, placement);
+          const workspace = await closeOutWorkspace(run, placement);
+          return callResult(options, placement, value, workspace.changedFiles);
         } finally {
           signal.removeEventListener("abort", stopOnAbort);
         }
@@ -1220,6 +1558,13 @@ export function createWorkflowService(
               resultProtocolVersion: RESULT_PROTOCOL_VERSION,
               maxRepairAttempts: MAX_REPAIR_ATTEMPTS,
             },
+            placement: {
+              environment:
+                options.environment === null
+                  ? { kind: "origin" }
+                  : options.environment,
+              continueThreadId: options.continueThreadId,
+            },
           });
           return { cacheKey, selection };
         };
@@ -1515,6 +1860,64 @@ export function createWorkflowService(
     return stopped;
   }
 
+  /**
+   * Destroy the worktrees a finished run provisioned, once the orchestrator
+   * has taken what it wants from them. Lane branches survive teardown, so the
+   * work is recoverable; uncommitted files do not, which is why a dirty lane
+   * is kept unless the caller explicitly accepts discarding it.
+   */
+  async function teardown(
+    runId: string,
+    options: { discardUncommitted: boolean },
+  ): Promise<WorkflowTeardownReport> {
+    const run = getRunRequired(db, runId);
+    if (run.status === "queued" || run.status === "running") {
+      throw new Error(
+        `Workflow run ${runId} is still ${run.status}; stop it before tearing down its worktrees`,
+      );
+    }
+    const report: WorkflowTeardownReport = {
+      runId,
+      destroyed: [],
+      kept: [],
+    };
+    for (const lane of listRunProvisionedEnvironments(db, runId)) {
+      try {
+        if (!options.discardUncommitted) {
+          const status = await readWorkspaceStatus(lane.environmentId);
+          if (status === null) {
+            report.kept.push({
+              ...lane,
+              reason:
+                "workspace status is unavailable, so uncommitted work cannot be ruled out",
+            });
+            continue;
+          }
+          if (
+            status.outcome === "available" &&
+            status.workspace.workingTree.hasUncommittedChanges
+          ) {
+            report.kept.push({
+              ...lane,
+              reason: `${status.workspace.workingTree.files.length} uncommitted file(s) would be discarded`,
+            });
+            continue;
+          }
+        }
+        await bb.sdk.environments.archiveThreads({
+          environmentId: lane.environmentId,
+        });
+        await bb.sdk.environments.delete({
+          environmentId: lane.environmentId,
+        });
+        report.destroyed.push(lane);
+      } catch (error) {
+        report.kept.push({ ...lane, reason: message(error) });
+      }
+    }
+    return report;
+  }
+
   return {
     start,
     get: (runId) => getRun(db, runId),
@@ -1524,6 +1927,7 @@ export function createWorkflowService(
     inspectActiveForThread,
     list: (projectId, limit) => listRuns(db, { projectId, limit }),
     stop,
+    teardown,
     updateSettings(settings) {
       currentSettings = settings;
     },
