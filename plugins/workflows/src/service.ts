@@ -487,6 +487,7 @@ export function createWorkflowService(
   }
   const controllers = new Map<string, AbortController>();
   const idleHandlers = new Set<string>();
+  const pendingIdleOutputs = new Map<string, string | null>();
   const handlerTasks = new Set<Promise<void>>();
   const idleHandlerTasks = new Map<string, Promise<void>>();
   const childStops = new Map<string, Promise<void>>();
@@ -1186,7 +1187,7 @@ export function createWorkflowService(
       committed,
       changedFiles:
         status?.outcome === "available"
-          ? (status.workspace.mergeBase?.files.length ?? null)
+          ? (status.workspace.mergeBase?.fileCount ?? null)
           : null,
     };
   }
@@ -1587,7 +1588,11 @@ export function createWorkflowService(
 
   function onThreadIdle(threadId: string, output: string | null): void {
     const call = getCallByChildThread(db, threadId);
-    if (call === null || idleHandlers.has(call.id)) return;
+    if (call === null || call.status !== "running") return;
+    if (idleHandlers.has(call.id)) {
+      if (continuationAdmissions.has(call.id)) pendingIdleOutputs.set(call.id, output);
+      return;
+    }
     idleHandlers.add(call.id);
     const task = handleThreadIdle(threadId, output)
       .catch((error) => {
@@ -1603,6 +1608,15 @@ export function createWorkflowService(
         idleHandlers.delete(call.id);
         idleHandlerTasks.delete(call.id);
         handlerTasks.delete(task);
+        // An idle event can arrive while a queued-send admission check is
+        // awaiting the SDK. Keep that event instead of stranding its result.
+        if (pendingIdleOutputs.has(call.id)) {
+          const pendingOutput = pendingIdleOutputs.get(call.id) ?? null;
+          pendingIdleOutputs.delete(call.id);
+          if (continuationAdmissions.has(call.id) && getCallByChildThread(db, threadId)?.id === call.id) {
+            onThreadIdle(threadId, pendingOutput);
+          }
+        }
       });
     handlerTasks.add(task);
     idleHandlerTasks.set(call.id, task);
@@ -2065,6 +2079,8 @@ export function createWorkflowService(
   }
 
   async function runWorker(signal: AbortSignal): Promise<void> {
+    shuttingDown = false;
+    claimRequested = true;
     signal.addEventListener(
       "abort",
       () => {
@@ -2125,7 +2141,7 @@ export function createWorkflowService(
     shuttingDown = true;
     for (const controller of controllers.values()) controller.abort();
     await Promise.allSettled(active);
-    await Promise.allSettled(handlerTasks);
+    while (handlerTasks.size > 0) await Promise.allSettled(handlerTasks);
     await stopChildren(recoverInterruptedRuns(db));
     await Promise.allSettled(childStops.values());
   }

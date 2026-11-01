@@ -16,6 +16,7 @@ ${body}`;
 interface WorkspaceState {
   uncommittedFiles: string[];
   changedFiles: number;
+  listedChangedFiles?: number;
   branchName: string;
   headSha?: string;
 }
@@ -56,6 +57,7 @@ function setup(options: LaneSetupOptions = {}) {
     workspaces.set(environmentId, {
       uncommittedFiles: state.uncommittedFiles ?? [],
       changedFiles: state.changedFiles ?? 1,
+      listedChangedFiles: state.listedChangedFiles,
       branchName: state.branchName ?? `bb/${environmentId}`,
     });
   }
@@ -213,7 +215,7 @@ function setup(options: LaneSetupOptions = {}) {
                 fileCount: workspace.changedFiles,
                 squashMergeCheckComplete: true,
                 files: Array.from(
-                  { length: workspace.changedFiles },
+                  { length: workspace.listedChangedFiles ?? workspace.changedFiles },
                   (_unused, index) => ({
                     path: `changed-${index}.ts`,
                     status: "M",
@@ -426,10 +428,13 @@ describe("workflow lane placement", () => {
     });
   });
 
-  it("reports the worker identity a script needs to address the lane again", async () => {
+  it.each([
+    { changedFiles: 3, listedChangedFiles: 0 },
+    { changedFiles: 0, listedChangedFiles: 1 },
+  ])("reports worker identity with the authoritative changed-file count ($changedFiles)", async ({ changedFiles, listedChangedFiles }) => {
     const test = setup({
       workspaces: {
-        "environment-lane-1": { changedFiles: 3, branchName: "bb/lane-1" },
+        "environment-lane-1": { changedFiles, listedChangedFiles, branchName: "bb/lane-1" },
       },
     });
     harnesses.push(test.harness);
@@ -446,7 +451,7 @@ describe("workflow lane placement", () => {
       threadId: "child-1",
       environmentId: "environment-lane-1",
       branchName: "bb/lane-1",
-      changedFiles: 3,
+      changedFiles,
     });
   });
 
@@ -465,7 +470,10 @@ describe("workflow lane placement", () => {
     expect(test.commits).toEqual(["environment-lane-1"]);
     expect(listCallsForRun(test.db, run.id)[0]?.provisionedEnvironment).toBe(true);
     expect((await test.service.teardown(run.id, { discardUncommitted: false })).destroyed)
-      .toEqual([{ environmentId: "environment-lane-1", branchName: "bb/lane-1" }]);
+      .toEqual([{
+        environmentId: "environment-lane-1",
+        branchName: test.workspaces.get("environment-lane-1")!.branchName,
+      }]);
   });
 
   it("does not infer destructive ownership from provisioning intent alone", async () => {
@@ -484,7 +492,7 @@ describe("workflow lane placement", () => {
   });
 
   it("preserves authoritative counts and worker identity across successive resumes without ownership", async () => {
-    const test = setup({ workspaces: { "environment-lane-1": { changedFiles: 3 } } });
+    const test = setup({ workspaces: { "environment-lane-1": { changedFiles: 3, listedChangedFiles: 1 } } });
     harnesses.push(test.harness);
     const script = source(`
       return await agent("build", { environment: { worktree: {} }, reportIdentity: true });`);
@@ -524,18 +532,27 @@ describe("workflow lane placement", () => {
     harnesses.push(test.harness);
     let admitted = false;
     let prompt = "";
+    let checkingOldOutput = false;
+    let releaseOldCheck!: () => void;
+    const oldCheck = new Promise<void>((resolve) => { releaseOldCheck = resolve; });
     test.harness.sdk.stub("threads.send", async (input: Parameters<BbPluginApi["sdk"]["threads"]["send"]>[0]) => {
       if (input.threadId === "origin") return { ok: true, delivery: "sent" };
       const inputText = input.input[0];
       prompt = inputText?.type === "text" ? inputText.text : "";
       return { ok: true, delivery: "queued", queuedMessage: { id: "held-continuation" } } as never;
     });
-    test.harness.sdk.stub("threads.events.list", async ({ afterSeq }) =>
-      afterSeq !== undefined && admitted ? [{
+    test.harness.sdk.stub("threads.events.list", async ({ afterSeq }) => {
+      if (afterSeq === undefined) return [];
+      if (!admitted) {
+        checkingOldOutput = true;
+        await oldCheck;
+        return [];
+      }
+      return [{
         seq: 2, type: "client/turn/requested",
         data: { originPluginId: "workflows", input: [{ type: "text", text: prompt, mentions: [] }] },
-      }] as never : [],
-    );
+      }] as never;
+    });
     test.harness.sdk.stub("threads.output", async () => ({
       output: structured ? '"done"' : "done",
     }));
@@ -547,6 +564,7 @@ describe("workflow lane placement", () => {
     const completion = test.runToCompletion(run.id);
     try {
       await vi.waitFor(() => expect(test.workerSendCalls()).toHaveLength(1));
+      await vi.waitFor(() => expect(checkingOldOutput).toBe(true));
       test.service.onThreadIdle("child-1", "done");
       await vi.waitFor(() => expect(listCallsForRun(test.db, run.id)[1]?.status).toBe("running"));
       expect(test.service.get(run.id)?.resultJson).toBeNull();
@@ -556,11 +574,13 @@ describe("workflow lane placement", () => {
         output: structured ? '"new result"' : "new result",
       }));
       test.service.onThreadIdle("child-1", "done");
+      releaseOldCheck();
       const finished = await completion;
       expect(JSON.parse(finished.resultJson!)).toBe("new result");
       expect(test.workerSendCalls()).toHaveLength(1);
     } finally {
       admitted = true;
+      releaseOldCheck();
       await completion;
     }
   });

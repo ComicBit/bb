@@ -103,6 +103,7 @@ function setup(options: LaneSetupOptions) {
   let childCount = 0;
   let db: Db | null = null;
   const workerEnvironments = new Map<string, string>();
+  const stoppedWorkers = new Set<string>();
   const answered = new Set<string>();
   const brainErrors: string[] = [];
   const workspaces = new Map<string, WorkspaceState>([
@@ -159,9 +160,10 @@ function setup(options: LaneSetupOptions) {
             projectId: "project-test",
             archivedAt: null,
             providerId: "codex",
-            status: awaitingStructuredResult(threadId) ? "running" : "idle",
+            status: !stoppedWorkers.has(threadId) && awaitingStructuredResult(threadId) ? "active" : "idle",
           } as never;
         },
+        events: { list: async () => [] },
         output: async () => ({ output: "done" }),
         defaultExecutionOptions: async () => ({
           model: "gpt-test",
@@ -191,8 +193,14 @@ function setup(options: LaneSetupOptions) {
           }
           return { id, environmentId: workerEnvironments.get(id) } as never;
         },
-        send: async () => ({ ok: true }) as never,
-        stop: async () => ({ ok: true }) as never,
+        send: async ({ threadId }) => {
+          stoppedWorkers.delete(threadId);
+          return { ok: true, delivery: "sent" };
+        },
+        stop: async ({ threadId }) => {
+          stoppedWorkers.add(threadId);
+          return { ok: true };
+        },
         archive: async () => ({ ok: true }) as never,
       },
       providers: {
@@ -306,6 +314,9 @@ function setup(options: LaneSetupOptions) {
             path: "/workspace",
             branchName: workspaces.get(environmentId)?.branchName ?? null,
             baseBranch: "main",
+            managed: environmentId !== "environment-origin",
+            isWorktree: environmentId !== "environment-origin",
+            workspaceProvisionType: environmentId === "environment-origin" ? "existing" : "managed-worktree",
           }) as never,
         commit: async ({ environmentId }) => {
           const workspace = workspaces.get(environmentId);
